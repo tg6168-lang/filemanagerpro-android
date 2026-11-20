@@ -56,7 +56,8 @@ sealed interface GoogleAuthUiState {
     data class Error(
         val message: String,
         val previousProfile: GoogleAccountProfile? = null,
-        val diagnosticSha1: String? = null
+        val diagnosticSha1: String? = null,
+        val expectedSha1: String? = null
     ) : GoogleAuthUiState
 }
 
@@ -68,7 +69,7 @@ sealed interface GoogleAuthUiState {
  */
 object GoogleAuthManager {
     private const val TAG = "GoogleAuthPortal"
-    private const val REGISTERED_DEBUG_SHA1 = "18:2E:77:D7:F3:68:96:1F:98:37:07:E4:A4:8C:32:48:33:00:90:26"
+    const val REGISTERED_DEBUG_SHA1 = "18:2E:77:D7:F3:68:96:1F:98:37:07:E4:A4:8C:32:48:33:00:90:26"
 
     private val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -133,8 +134,10 @@ object GoogleAuthManager {
 
         managerScope.launch {
             try {
-                // Pass Activity directly (CredentialManager 1.5.0 requires an Activity context for UI/Play Services)
+                // Pass Activity directly (CredentialManager requires an Activity context for Play Services UI)
                 val credentialManager = CredentialManager.create(activity)
+                val installedSha1 = getInstalledApkSha1(activity)
+                val isCertMismatch = installedSha1 != null && !installedSha1.equals(REGISTERED_DEBUG_SHA1, ignoreCase = true)
 
                 // Step 1: Official interactive GetSignInWithGoogleOption (1 option per request)
                 val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = serverClientId).build()
@@ -146,27 +149,22 @@ object GoogleAuthManager {
                     credentialManager.getCredential(activity, primaryRequest)
                 } catch (e: GetCredentialCancellationException) {
                     Log.w(TAG, "Google Sign-In flow cancelled or dismissed: ${e.message}", e)
-                    val installedSha1 = getInstalledApkSha1(activity)
-                    val isCertMismatch = installedSha1 != null && !installedSha1.equals(REGISTERED_DEBUG_SHA1, ignoreCase = true)
-                    val rawMsg = e.message.orEmpty()
-                    val looksLikeConfigError = rawMsg.contains("28444") ||
-                        rawMsg.contains("16:") ||
-                        rawMsg.contains("developer console", ignoreCase = true) ||
-                        rawMsg.contains("caller", ignoreCase = true) ||
-                        rawMsg.contains("certificate", ignoreCase = true)
-                    if (isCertMismatch) {
-                        _authState.value = buildDiagnosticError("certificate hash mismatch", activity, previousProfile)
-                    } else if (looksLikeConfigError) {
+                    if (isCertMismatch || isConfigOrCertErrorMessage(e.message.orEmpty())) {
+                        // Automatically fall back to browser OAuth when Credential Manager rejects cert/config
                         launchFirebaseGoogleWebOAuth(activity, previousProfile)
                     } else {
                         _authState.value = GoogleAuthUiState.Error(
-                            message = "Đã đóng hộp thoại Google. Hãy chọn tài khoản để tiếp tục hoặc thử \"Đăng nhập Google qua trình duyệt\".",
+                            message = "Đã đóng hộp thoại chọn tài khoản Google. Hãy nhấn thử lại hoặc chọn đăng nhập qua trình duyệt.",
                             previousProfile = previousProfile
                         )
                     }
                     return@launch
                 } catch (primaryErr: GetCredentialException) {
                     Log.w(TAG, "Primary GetSignInWithGoogleOption failed (${primaryErr::class.simpleName}): ${primaryErr.message}")
+                    if (isCertMismatch || isConfigOrCertErrorMessage(primaryErr.message.orEmpty())) {
+                        launchFirebaseGoogleWebOAuth(activity, previousProfile)
+                        return@launch
+                    }
                     // Step 2: Try GetGoogleIdOption in a separate single-option request before Web OAuth
                     try {
                         val fallbackOption = GetGoogleIdOption.Builder()
@@ -180,12 +178,10 @@ object GoogleAuthManager {
                         credentialManager.getCredential(activity, fallbackRequest)
                     } catch (cancelErr: GetCredentialCancellationException) {
                         Log.w(TAG, "Fallback GetGoogleIdOption cancelled or dismissed: ${cancelErr.message}", cancelErr)
-                        val installedSha1 = getInstalledApkSha1(activity)
-                        val isCertMismatch = installedSha1 != null && !installedSha1.equals(REGISTERED_DEBUG_SHA1, ignoreCase = true)
-                        _authState.value = if (isCertMismatch) {
-                            buildDiagnosticError("certificate hash mismatch", activity, previousProfile)
+                        if (isCertMismatch || isConfigOrCertErrorMessage(cancelErr.message.orEmpty())) {
+                            launchFirebaseGoogleWebOAuth(activity, previousProfile)
                         } else {
-                            GoogleAuthUiState.Error(
+                            _authState.value = GoogleAuthUiState.Error(
                                 message = "Đã hủy chọn tài khoản Google. Bạn có thể thử lại hoặc dùng \"Đăng nhập Google qua trình duyệt\".",
                                 previousProfile = previousProfile
                             )
@@ -259,13 +255,18 @@ object GoogleAuthManager {
         previousProfile: GoogleAccountProfile?
     ) {
         try {
-            _authState.value = GoogleAuthUiState.Loading("Đang kết nối cổng đăng nhập Google...")
+            val existingUser = auth.currentUser?.toProfile()
+            if (existingUser != null && previousProfile == null) {
+                _authState.value = GoogleAuthUiState.SignedIn(existingUser)
+                return
+            }
+
+            _authState.value = GoogleAuthUiState.Loading("Đang kết nối cổng đăng nhập Google qua trình duyệt...")
             val provider = OAuthProvider.newBuilder("google.com")
                 .setScopes(listOf("email", "profile"))
                 .addCustomParameter("prompt", "select_account")
                 .build()
 
-            // Always start a fresh interactive provider activity rather than re-awaiting a stale failed pendingAuthResult
             val result = auth.startActivityForSignInWithProvider(activity, provider).awaitTask()
 
             val profile = (result.user ?: auth.currentUser)?.toProfile()
@@ -279,30 +280,42 @@ object GoogleAuthManager {
         } catch (e: Exception) {
             Log.w(TAG, "Web OAuth sign-in notice: ${e.message}", e)
             _authState.value = buildDiagnosticError(
-                rawMessage = e.localizedMessage.orEmpty(),
+                rawMessage = e.localizedMessage ?: e.message.orEmpty(),
                 context = activity,
-                previousProfile = previousProfile
+                previousProfile = previousProfile,
+                fromWebOAuth = true
             )
         }
+    }
+
+    private fun isConfigOrCertErrorMessage(rawMessage: String): Boolean {
+        return rawMessage.contains("28444") ||
+            rawMessage.contains("16:") ||
+            rawMessage.contains("developer console", ignoreCase = true) ||
+            rawMessage.contains("caller", ignoreCase = true) ||
+            rawMessage.contains("certificate", ignoreCase = true) ||
+            rawMessage.contains("CERT_HASH", ignoreCase = true) ||
+            rawMessage.contains("not authorized", ignoreCase = true) ||
+            rawMessage.contains("blocked", ignoreCase = true)
     }
 
     private fun buildDiagnosticError(
         rawMessage: String,
         context: Context,
-        previousProfile: GoogleAccountProfile?
+        previousProfile: GoogleAccountProfile?,
+        fromWebOAuth: Boolean = false
     ): GoogleAuthUiState.Error {
         val installedSha1 = getInstalledApkSha1(context)
         val isCertMismatch = installedSha1 != null && !installedSha1.equals(REGISTERED_DEBUG_SHA1, ignoreCase = true)
-        val mentionsCertHash = rawMessage.contains("certificate hash", ignoreCase = true) ||
-            rawMessage.contains("CERT_HASH", ignoreCase = true) ||
-            rawMessage.contains("28444") ||
-            rawMessage.contains("16:")
+        val mentionsCertHash = isConfigOrCertErrorMessage(rawMessage)
+        val isUserCancel = (rawMessage.contains("canceled", ignoreCase = true) ||
+            rawMessage.contains("cancelled", ignoreCase = true) ||
+            rawMessage.contains("web operation was canceled", ignoreCase = true)) && !mentionsCertHash
 
         return when {
-            rawMessage.contains("canceled", ignoreCase = true) ||
-                rawMessage.contains("cancelled", ignoreCase = true) ->
+            isUserCancel ->
                 GoogleAuthUiState.Error(
-                    message = "Bạn đã hủy đăng nhập Google.",
+                    message = "Bạn đã đóng cửa sổ đăng nhập Google.",
                     previousProfile = previousProfile
                 )
             rawMessage.contains("network", ignoreCase = true) ->
@@ -310,21 +323,30 @@ object GoogleAuthManager {
                     message = "Không có kết nối Internet để đăng nhập Google.",
                     previousProfile = previousProfile
                 )
-            isCertMismatch ->
+            isCertMismatch -> {
+                val detail = rawMessage.takeIf { it.isNotBlank() && !it.equals("certificate hash mismatch", ignoreCase = true) }
+                val prefix = if (fromWebOAuth && detail != null) {
+                    "Đăng nhập trình duyệt báo lỗi ($detail). "
+                } else {
+                    ""
+                }
                 GoogleAuthUiState.Error(
-                    message = "Chữ ký APK hiện tại chưa khớp với Firebase (SHA-1 đang cài: $installedSha1). Hãy cài bản Debug APK mới nhất hoặc thêm SHA-1 này vào Firebase.",
+                    message = "${prefix}Chữ ký APK đang cài (SHA-1: $installedSha1) chưa khớp với chữ ký Firebase đã đăng ký ($REGISTERED_DEBUG_SHA1). Hãy dùng bản APK build từ Tab \"Mã nguồn -> Đẩy lên GitHub & Tạo APK\" hoặc thêm SHA-1 đang cài vào Firebase Console.",
                     previousProfile = previousProfile,
-                    diagnosticSha1 = installedSha1
+                    diagnosticSha1 = installedSha1,
+                    expectedSha1 = REGISTERED_DEBUG_SHA1
                 )
+            }
             mentionsCertHash ->
                 GoogleAuthUiState.Error(
-                    message = "Lỗi xác thực chứng chỉ gói APK (${installedSha1 ?: "không xác định"}). Vui lòng cập nhật lại bản cài đặt mới nhất từ trình dựng ứng dụng.",
+                    message = "Lỗi xác thực chứng chỉ gói APK (${installedSha1 ?: "không xác định"}): ${rawMessage.ifBlank { "Vui lòng cập nhật bản cài đặt chuẩn Firebase." }}",
                     previousProfile = previousProfile,
-                    diagnosticSha1 = installedSha1
+                    diagnosticSha1 = installedSha1,
+                    expectedSha1 = REGISTERED_DEBUG_SHA1
                 )
             else ->
                 GoogleAuthUiState.Error(
-                    message = "Không thể hoàn tất đăng nhập Google: ${rawMessage.ifBlank { "Vui lòng kiểm tra kết nối mạng và thử lại." }}",
+                    message = "Không thể hoàn tất đăng nhập Google: ${rawMessage.ifBlank { "Vui lòng kiểm tra kết nối mạng / trình duyệt mặc định và thử lại." }}",
                     previousProfile = previousProfile
                 )
         }

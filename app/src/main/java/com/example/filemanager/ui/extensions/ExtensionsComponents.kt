@@ -97,6 +97,7 @@ fun GoogleAccountPortalCard(
     val errorState = authState as? GoogleAuthUiState.Error
     val errorMessage = errorState?.message
     val diagnosticSha1 = errorState?.diagnosticSha1
+    val expectedSha1 = errorState?.expectedSha1
 
     Surface(
         color = CharcoalSurface,
@@ -205,10 +206,12 @@ fun GoogleAccountPortalCard(
                                 onClick = {
                                     clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(diagnosticSha1))
                                 },
-                                shape = RoundedCornerShape(6.dp),
+                                shape = RoundedCornerShape(8.dp),
                                 border = BorderStroke(1.dp, ColorWarningAmber.copy(alpha = 0.6f)),
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                                modifier = Modifier.heightIn(min = 48.dp)
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.ContentCopy,
@@ -225,6 +228,14 @@ fun GoogleAccountPortalCard(
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
+                        }
+                        if (!expectedSha1.isNullOrBlank()) {
+                            Text(
+                                text = "Chữ ký chuẩn Firebase: $expectedSha1 (đã đóng gói sẵn trong Tab Mã nguồn -> Đẩy lên GitHub & Tạo APK).",
+                                color = CyanAccent,
+                                fontSize = 11.sp,
+                                lineHeight = 15.sp
+                            )
                         }
                     }
                 }
@@ -282,7 +293,7 @@ fun GoogleAccountPortalCard(
                         border = BorderStroke(1.dp, CharcoalSurfaceHighlight),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(min = 44.dp)
+                            .heightIn(min = 48.dp)
                             .testTag("google_web_oauth_button")
                     ) {
                         Icon(

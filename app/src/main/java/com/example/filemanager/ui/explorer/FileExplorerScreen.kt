@@ -1741,6 +1741,8 @@ private fun PaneContent(
         }
     } else {
         LazyColumn(
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
             modifier = Modifier
                 .fillMaxSize()
                 .clickable { onFocus() }
@@ -1800,10 +1802,20 @@ private fun DocumentsUIListItem(
     val context = LocalContext.current
     var showItemMenu by remember { mutableStateOf(false) }
 
-    Column(
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = if (isSelected) CyanGlow.copy(alpha = 0.14f) else CharcoalSurface,
+        border = androidx.compose.foundation.BorderStroke(
+            width = 1.dp,
+            color = when {
+                isSelected -> CyanGlow.copy(alpha = 0.75f)
+                item.isDirectory -> GoldAccent.copy(alpha = 0.30f)
+                else -> CharcoalSurfaceHighlight
+            }
+        ),
         modifier = Modifier
             .fillMaxWidth()
-            .background(if (isSelected) ElectricBlue.copy(alpha = 0.18f) else Color.Transparent)
+            .clip(RoundedCornerShape(12.dp))
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick
@@ -1812,20 +1824,21 @@ private fun DocumentsUIListItem(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 7.dp),
+                .padding(start = 10.dp, end = 4.dp, top = 7.dp, bottom = 7.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Left Icon (Grey folder in screenshot, or distinctive file icon)
-            FileIcon(item = item, isSelected = isSelected, modifier = Modifier.size(34.dp))
+            // Left Icon (Dark Premium bordered badge for folders, or rich file thumbnail/badge)
+            FileIcon(item = item, isSelected = isSelected, modifier = Modifier.size(38.dp))
 
-            Spacer(modifier = Modifier.width(16.dp))
+            Spacer(modifier = Modifier.width(12.dp))
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = item.name,
                     color = TextPrimary,
                     style = MaterialTheme.typography.bodyLarge,
-                    fontSize = 15.sp,
+                    fontSize = 14.5.sp,
+                    fontWeight = if (item.isDirectory) FontWeight.Medium else FontWeight.Normal,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -1833,9 +1846,9 @@ private fun DocumentsUIListItem(
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = "${item.formattedSize}  •  ${item.formattedDate}",
-                        color = Color(0xFF8A909D),
+                        color = TextSecondary,
                         style = MaterialTheme.typography.labelSmall,
-                        fontSize = 12.sp
+                        fontSize = 11.5.sp
                     )
                 }
             }
@@ -1844,13 +1857,13 @@ private fun DocumentsUIListItem(
             Box {
                 IconButton(
                     onClick = { showItemMenu = true },
-                    modifier = Modifier.size(28.dp)
+                    modifier = Modifier.size(48.dp)
                 ) {
                     Icon(
                         Icons.Default.MoreVert,
                         contentDescription = "Tùy chọn",
-                        tint = Color(0xFF6B7280),
-                        modifier = Modifier.size(16.dp)
+                        tint = TextSecondary,
+                        modifier = Modifier.size(18.dp)
                     )
                 }
 
@@ -1956,18 +1969,6 @@ private fun DocumentsUIListItem(
                 }
             }
         }
-
-        // Thin divider line indented to align with text start (DocumentsUI style)
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 58.dp)
-        ) {
-            HorizontalDivider(
-                color = DocumentsUIDivider,
-                thickness = 0.6.dp
-            )
-        }
     }
 }
 
@@ -1983,12 +1984,19 @@ private fun GridFileCard(
     onLongClick: () -> Unit
 ) {
     Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = if (isSelected) ElectricBlue.copy(alpha = 0.22f) else CharcoalSurface,
-        border = if (isSelected) androidx.compose.foundation.BorderStroke(1.5.dp, ElectricBlue) else androidx.compose.foundation.BorderStroke(1.dp, CharcoalSurfaceHighlight),
+        shape = RoundedCornerShape(12.dp),
+        color = if (isSelected) CyanGlow.copy(alpha = 0.16f) else CharcoalSurface,
+        border = androidx.compose.foundation.BorderStroke(
+            width = 1.1.dp,
+            color = when {
+                isSelected -> CyanGlow.copy(alpha = 0.8f)
+                item.isDirectory -> GoldAccent.copy(alpha = 0.38f)
+                else -> CharcoalSurfaceHighlight
+            }
+        ),
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(12.dp))
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick
@@ -2234,12 +2242,24 @@ fun FileIcon(item: FileItem, isSelected: Boolean, modifier: Modifier = Modifier)
     }
 
     if (item.isDirectory) {
-        Icon(
-            imageVector = Icons.Default.Folder,
-            contentDescription = "Thư mục",
-            tint = Color(0xFFFFA000), // Vibrant golden folder
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = GoldAccent.copy(alpha = 0.14f),
+            border = androidx.compose.foundation.BorderStroke(1.1.dp, GoldAccent.copy(alpha = 0.6f)),
             modifier = modifier
-        )
+        ) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Folder,
+                    contentDescription = "Thư mục",
+                    tint = GoldAccent,
+                    modifier = Modifier.fillMaxSize(0.62f)
+                )
+            }
+        }
         return
     }
 

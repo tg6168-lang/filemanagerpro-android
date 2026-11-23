@@ -1,599 +1,609 @@
-import React, { useRef, useState, useImperativeHandle, forwardRef, useMemo } from 'react';
-import {
-  FileCode,
-  Plus,
-  X,
-  Search,
-  Check,
-  Copy,
-} from 'lucide-react';
-import { CodeFile } from '../types';
-import { SyntaxTheme } from '../types/theme';
+import React, { useRef, useState, useImperativeHandle, forwardRef, useEffect, useMemo } from 'react';
+import { ArrowUpToLine } from 'lucide-react';
+import { SyntaxColors } from '../types';
+import { highlightPythonCode } from '../utils/highlighter';
 
-export interface EditorHandle {
-  insertTextAtCursor: (text: string, cursorOffset?: number) => void;
-  indentSelection: () => void;
-  unindentSelection: () => void;
-  getText: () => string;
-  setText: (newText: string) => void;
+/**
+ * Measure character width for monospace font precisely using canvas
+ */
+const getCharWidth = (fontSize: number, fontFamily: string): number => {
+  if (typeof document === 'undefined') return fontSize * 0.6;
+  try {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.font = `${fontSize}px ${fontFamily}`;
+      const width = ctx.measureText('M').width;
+      if (width > 0) return width;
+    }
+  } catch (e) {
+    // fallback
+  }
+  return fontSize * 0.6;
+};
+
+export interface EditorRef {
+  insertTextAtCursor: (text: string) => void;
+  focus: () => void;
+  getValue: () => string;
+  setValue: (val: string) => void;
+  getSelection: () => { start: number; end: number };
 }
 
 interface EditorProps {
-  files: CodeFile[];
-  activeFileId: string;
-  onSelectFile: (id: string) => void;
-  onAddFile: () => void;
-  onCloseFile: (id: string) => void;
-  onChangeContent: (content: string) => void;
-  highlightLine?: number;
+  code: string;
+  onChange: (newCode: string) => void;
+  colors: SyntaxColors;
   fontSize: number;
-  theme: SyntaxTheme;
+  fontFamily: string;
+  indentSpaces: number;
+  isLinterEnabled?: boolean;
+  onTriggerAiDebug?: (errorText: string, openModal?: boolean) => void;
 }
 
-const PYTHON_KEYWORDS = new Set([
-  'and', 'as', 'assert', 'break', 'class', 'continue', 'def', 'del', 'elif',
-  'else', 'except', 'False', 'finally', 'for', 'from', 'global', 'if', 'import',
-  'in', 'is', 'lambda', 'None', 'nonlocal', 'not', 'or', 'pass', 'raise',
-  'return', 'True', 'try', 'while', 'with', 'yield', 'async', 'await'
-]);
+export const Editor = forwardRef<EditorRef, EditorProps>(({
+  code,
+  onChange,
+  colors,
+  fontSize,
+  fontFamily,
+  indentSpaces,
+  isLinterEnabled = false,
+  onTriggerAiDebug,
+}, ref) => {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const verticalScrollRef = useRef<HTMLDivElement>(null);
+  const horizontalScrollRef = useRef<HTMLDivElement>(null);
 
-const PYTHON_BUILTINS = new Set([
-  'abs', 'all', 'any', 'ascii', 'bin', 'bool', 'bytearray', 'bytes', 'callable',
-  'chr', 'classmethod', 'compile', 'complex', 'delattr', 'dict', 'dir', 'divmod',
-  'enumerate', 'eval', 'exec', 'filter', 'float', 'format', 'frozenset', 'getattr',
-  'globals', 'hasattr', 'hash', 'help', 'hex', 'id', 'input', 'int', 'isinstance',
-  'issubclass', 'iter', 'len', 'list', 'locals', 'map', 'max', 'memoryview',
-  'min', 'next', 'object', 'oct', 'open', 'ord', 'pow', 'print', 'property',
-  'range', 'repr', 'reversed', 'round', 'set', 'setattr', 'slice', 'sorted',
-  'staticmethod', 'str', 'sum', 'super', 'tuple', 'type', 'vars', 'zip'
-]);
+  // Line height constant to ensure pixel-perfect synchronization across gutter, backdrop, and textarea
+  const lineHeightPx = Math.round(fontSize * 1.55);
 
-// Tokenizer to produce colored elements based on user's SyntaxTheme
-function highlightPythonLine(line: string, theme: SyntaxTheme, inDocstring: boolean): { elements: React.ReactNode[]; endsInDocstring: boolean } {
-  const elements: React.ReactNode[] = [];
-  let i = 0;
-  const len = line.length;
+  const [activeLine, setActiveLine] = useState<number>(1);
+  const [isScrolledFar, setIsScrolledFar] = useState<boolean>(false);
 
-  if (inDocstring) {
-    const endTriple = line.indexOf('"""') !== -1 ? line.indexOf('"""') : line.indexOf("'''");
-    if (endTriple !== -1) {
-      elements.push(
-        <span key="doc-end" style={{ color: theme.strings }}>
-          {line.substring(0, endTriple + 3)}
-        </span>
-      );
-      i = endTriple + 3;
-      inDocstring = false;
-    } else {
-      elements.push(
-        <span key="doc-body" style={{ color: theme.strings }}>
-          {line}
-        </span>
-      );
-      return { elements, endsInDocstring: true };
-    }
-  }
+  // Auto-scroll tracking references
+  const isEnterKeyRef = useRef<boolean>(false);
+  const prevCodeRef = useRef<string>(code);
+  const lastSelectionStartRef = useRef<number>(0);
+  const isUserDraggingTouchRef = useRef<boolean>(false);
+  const touchStartPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const focusTimersRef = useRef<number[]>([]);
 
-  while (i < len) {
-    // Comments
-    if (line[i] === '#') {
-      elements.push(
-        <span key={`comm_${i}`} style={{ color: theme.comments }}>
-          {line.substring(i)}
-        </span>
-      );
-      break;
-    }
+  const clearPendingFocusTimers = () => {
+    focusTimersRef.current.forEach((id) => window.clearTimeout(id));
+    focusTimersRef.current = [];
+  };
 
-    // Triple Quotes Docstrings
-    if (line.substring(i, i + 3) === '"""' || line.substring(i, i + 3) === "'''") {
-      const quoteType = line.substring(i, i + 3);
-      const nextIdx = line.indexOf(quoteType, i + 3);
-      if (nextIdx !== -1) {
-        elements.push(
-          <span key={`doc_${i}`} style={{ color: theme.strings }}>
-            {line.substring(i, nextIdx + 3)}
-          </span>
-        );
-        i = nextIdx + 3;
-      } else {
-        elements.push(
-          <span key={`doc_${i}`} style={{ color: theme.strings }}>
-            {line.substring(i)}
-          </span>
-        );
-        return { elements, endsInDocstring: true };
-      }
-      continue;
-    }
+  /**
+   * 📐 Thuật toán tự động cuộn ngang thông minh theo 3 quy tắc:
+   * 1-- Nhận diện isEnter: Chỉ cuộn về mép trái (scrollLeft = 0) khi vừa gõ phím Enter (\n)
+   * 2-- Khóa cứng vị trí trong vùng nhìn: Con trỏ trong tầm nhìn thì giữ nguyên 100% vị trí cuộn ngang
+   * 3-- Tự động cuộn sang phải theo từng ký tự gõ: Giữ khoảng đệm ~2.5 ký tự
+   */
+  const applyAutoScroll = (forcedIsEnter?: boolean) => {
+    const textarea = textareaRef.current;
+    const hScroll = horizontalScrollRef.current;
+    if (!textarea || !hScroll) return;
 
-    // Strings single or double
-    if (line[i] === '"' || line[i] === "'") {
-      const quoteChar = line[i];
-      let j = i + 1;
-      while (j < len && line[j] !== quoteChar) {
-        if (line[j] === '\\') j++;
-        j++;
-      }
-      elements.push(
-        <span key={`str_${i}`} style={{ color: theme.strings }}>
-          {line.substring(i, Math.min(len, j + 1))}
-        </span>
-      );
-      i = j + 1;
-      continue;
-    }
+    const pos = textarea.selectionStart;
+    const val = textarea.value;
 
-    // Numbers
-    if (/\d/.test(line[i])) {
-      let j = i;
-      while (j < len && /[\d.xXa-fA-F_]/.test(line[j])) {
-        j++;
-      }
-      elements.push(
-        <span key={`num_${i}`} style={{ color: theme.numbers }}>
-          {line.substring(i, j)}
-        </span>
-      );
-      i = j;
-      continue;
-    }
-
-    // Words / Identifiers
-    if (/[a-zA-Z_]/.test(line[i])) {
-      let j = i;
-      while (j < len && /[a-zA-Z0-9_]/.test(line[j])) {
-        j++;
-      }
-      const word = line.substring(i, j);
-
-      if (PYTHON_KEYWORDS.has(word)) {
-        elements.push(
-          <span key={`kw_${i}`} style={{ color: theme.keywords }}>
-            {word}
-          </span>
-        );
-      } else if (PYTHON_BUILTINS.has(word)) {
-        elements.push(
-          <span key={`bi_${i}`} style={{ color: theme.builtins }}>
-            {word}
-          </span>
-        );
-      } else if (i > 0 && /def\s+$/.test(line.substring(0, i))) {
-        elements.push(
-          <span key={`func_${i}`} style={{ color: theme.functions }}>
-            {word}
-          </span>
-        );
-      } else if (i > 0 && /class\s+$/.test(line.substring(0, i))) {
-        elements.push(
-          <span key={`cls_${i}`} style={{ color: theme.functions }}>
-            {word}
-          </span>
-        );
-      } else {
-        elements.push(
-          <span key={`id_${i}`} style={{ color: theme.variables }}>
-            {word}
-          </span>
-        );
-      }
-      i = j;
-      continue;
-    }
-
-    // Operators and punctuation
-    if (/[+\-*/%=&|^~<>!?:;,]/.test(line[i])) {
-      elements.push(
-        <span key={`op_${i}`} style={{ color: theme.operators }}>
-          {line[i]}
-        </span>
-      );
-      i++;
-      continue;
-    }
-
-    // Normal characters / whitespace
-    elements.push(
-      <span key={`fg_${i}`} style={{ color: theme.foreground }}>
-        {line[i]}
-      </span>
+    const isEnter = forcedIsEnter ?? (
+      isEnterKeyRef.current || (
+        pos > 0 &&
+        val[pos - 1] === '\n' &&
+        val.length > prevCodeRef.current.length &&
+        val.slice(0, pos - 1) === prevCodeRef.current.slice(0, pos - 1)
+      )
     );
-    i++;
-  }
 
-  return { elements, endsInDocstring: false };
-}
+    isEnterKeyRef.current = false;
+    prevCodeRef.current = val;
 
-export const Editor = forwardRef<EditorHandle, EditorProps>(
-  (
-    {
-      files,
-      activeFileId,
-      onSelectFile,
-      onAddFile,
-      onCloseFile,
-      onChangeContent,
-      highlightLine,
-      fontSize,
-      theme,
-    },
-    ref
-  ) => {
-    const activeFile = files.find((f) => f.id === activeFileId) || files[0];
-    const textareaRef = useRef<HTMLTextAreaElement>(null);
-    const lineNumbersRef = useRef<HTMLDivElement>(null);
-    const backdropRef = useRef<HTMLDivElement>(null);
+    if (isEnter) {
+      hScroll.scrollLeft = 0;
+      return;
+    }
 
-    const [cursorPos, setCursorPos] = useState({ line: 1, col: 1 });
-    const [showSearch, setShowSearch] = useState(false);
-    const [searchQuery, setSearchQuery] = useState('');
-    const [replaceQuery, setReplaceQuery] = useState('');
-    const [copied, setCopied] = useState(false);
+    const textBefore = val.slice(0, pos);
+    const lastLineBreak = textBefore.lastIndexOf('\n');
+    const lineTextBefore = lastLineBreak === -1 ? textBefore : textBefore.slice(lastLineBreak + 1);
+    const col = lineTextBefore.length;
 
-    // Sync scroll
-    const handleScroll = () => {
-      if (textareaRef.current) {
-        const top = textareaRef.current.scrollTop;
-        const left = textareaRef.current.scrollLeft;
-        if (lineNumbersRef.current) lineNumbersRef.current.scrollTop = top;
-        if (backdropRef.current) {
-          backdropRef.current.scrollTop = top;
-          backdropRef.current.scrollLeft = left;
-        }
+    const charWidth = getCharWidth(fontSize, fontFamily);
+    const paddingLeft = 12; // pl-3
+    const paddingRight = 32; // pr-8
+    const cursorPixelX = paddingLeft + col * charWidth;
+
+    const curScrollLeft = hScroll.scrollLeft;
+    const viewportWidth = hScroll.clientWidth;
+    if (viewportWidth <= 0) return;
+
+    const rightMargin = 2.5 * charWidth;
+    const visibleLeft = curScrollLeft + paddingLeft;
+    const visibleRight = curScrollLeft + viewportWidth - paddingRight - rightMargin;
+
+    if (cursorPixelX >= visibleLeft && cursorPixelX <= visibleRight) {
+      return;
+    }
+
+    if (cursorPixelX > visibleRight) {
+      const targetScrollLeft = Math.round(cursorPixelX - viewportWidth + paddingRight + rightMargin);
+      hScroll.scrollLeft = Math.max(0, targetScrollLeft);
+      return;
+    }
+
+    if (cursorPixelX < visibleLeft) {
+      const targetScrollLeft = Math.max(0, Math.round(cursorPixelX - paddingLeft - 1.5 * charWidth));
+      hScroll.scrollLeft = targetScrollLeft;
+    }
+  };
+
+  /**
+   * 📱 Tự động cuộn theo chiều dọc để đưa dòng đang gõ lên vùng hiển thị rõ ràng,
+   * đảm bảo dấu nháy con trỏ KHÔNG BAO GIỜ bị ẩn dưới bàn phím điện thoại hay thanh BottomKeyBar.
+   */
+  const scrollActiveLineIntoView = (forcedLineNum?: number) => {
+    const vScroll = verticalScrollRef.current;
+    const textarea = textareaRef.current;
+    if (!vScroll || !textarea) return;
+
+    const clientHeight = vScroll.clientHeight;
+    if (clientHeight <= 0) return;
+
+    const pos = textarea.selectionStart ?? 0;
+    const liveLine = forcedLineNum ?? textarea.value.slice(0, pos).split('\n').length;
+
+    const lineTop = (liveLine - 1) * lineHeightPx + 12;
+    const lineBottom = lineTop + lineHeightPx;
+    const curScrollTop = vScroll.scrollTop;
+
+    // Khoảng đệm thích ứng để hoạt động mượt trên cả màn hình nhỏ khi bàn phím mở
+    const margin = Math.min(Math.round(lineHeightPx * 1.8), Math.max(8, Math.floor(clientHeight * 0.22)));
+    const maxScrollTop = Math.max(0, vScroll.scrollHeight - clientHeight);
+
+    if (lineBottom + margin > curScrollTop + clientHeight) {
+      const target = Math.min(maxScrollTop, Math.max(0, lineBottom + margin - clientHeight));
+      vScroll.scrollTop = target;
+    } else if (lineTop - margin < curScrollTop) {
+      const target = Math.max(0, lineTop - margin);
+      vScroll.scrollTop = target;
+    }
+  };
+
+  // Theo dõi chính xác khi khung soạn thảo bị thu hẹp chiều cao (bàn phím Android bật lên)
+  useEffect(() => {
+    const vScroll = verticalScrollRef.current;
+    if (!vScroll || typeof ResizeObserver === 'undefined') return;
+
+    let prevHeight = vScroll.clientHeight;
+    const observer = new ResizeObserver(() => {
+      const nextHeight = vScroll.clientHeight;
+      const shrunk = nextHeight > 0 && nextHeight < prevHeight - 16;
+      prevHeight = nextHeight;
+
+      if (shrunk && textareaRef.current && document.activeElement === textareaRef.current) {
+        requestAnimationFrame(() => {
+          scrollActiveLineIntoView();
+          applyAutoScroll();
+        });
+      }
+    });
+
+    observer.observe(vScroll);
+    return () => observer.disconnect();
+  }, [lineHeightPx, fontSize, fontFamily]);
+
+  // Dự phòng qua visualViewport & window.resize cho các trình duyệt/ROM Android khác nhau
+  useEffect(() => {
+    let prevVvHeight = typeof window !== 'undefined' ? (window.visualViewport?.height ?? window.innerHeight) : 0;
+
+    const handleViewportChange = () => {
+      if (typeof window === 'undefined') return;
+      const curHeight = window.visualViewport?.height ?? window.innerHeight;
+      const shrunk = curHeight > 0 && curHeight < prevVvHeight - 16;
+      prevVvHeight = curHeight;
+
+      if (shrunk && textareaRef.current && document.activeElement === textareaRef.current && !isUserDraggingTouchRef.current) {
+        requestAnimationFrame(() => scrollActiveLineIntoView());
+        const t = window.setTimeout(() => {
+          if (!isUserDraggingTouchRef.current) {
+            scrollActiveLineIntoView();
+          }
+        }, 120);
+        focusTimersRef.current.push(t);
       }
     };
 
-    const updateCursorPosition = () => {
-      if (!textareaRef.current) return;
-      const text = textareaRef.current.value;
-      const selStart = textareaRef.current.selectionStart;
-      const lines = text.substring(0, selStart).split('\n');
-      setCursorPos({
-        line: lines.length,
-        col: lines[lines.length - 1].length + 1,
-      });
-    };
+    window.addEventListener('resize', handleViewportChange);
+    if (typeof window !== 'undefined' && window.visualViewport) {
+      window.visualViewport.addEventListener('resize', handleViewportChange);
+    }
 
-    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    return () => {
+      window.removeEventListener('resize', handleViewportChange);
+      if (typeof window !== 'undefined' && window.visualViewport) {
+        window.visualViewport.removeEventListener('resize', handleViewportChange);
+      }
+      clearPendingFocusTimers();
+    };
+  }, [lineHeightPx]);
+
+  // Expose methods to parent (e.g. for BottomKeyBar quick insert)
+  useImperativeHandle(ref, () => ({
+    insertTextAtCursor: (text: string) => {
       const textarea = textareaRef.current;
       if (!textarea) return;
 
-      if (e.key === 'Tab') {
-        e.preventDefault();
-        const start = textarea.selectionStart;
-        const end = textarea.selectionEnd;
-        const val = textarea.value;
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      const val = textarea.value;
 
-        const updated = val.substring(0, start) + '    ' + val.substring(end);
-        onChangeContent(updated);
-
-        setTimeout(() => {
-          textarea.selectionStart = textarea.selectionEnd = start + 4;
-          updateCursorPosition();
-        }, 0);
-      } else if (e.key === 'Enter') {
-        const start = textarea.selectionStart;
-        const val = textarea.value;
-        const currentLine = val.substring(0, start).split('\n').pop() || '';
-        const match = currentLine.match(/^(\s*)/);
-        let indent = match ? match[1] : '';
-
-        if (currentLine.trim().endsWith(':')) {
-          indent += '    ';
-        }
-
-        if (indent.length > 0) {
-          e.preventDefault();
-          const updated =
-            val.substring(0, start) + '\n' + indent + val.substring(start);
-          onChangeContent(updated);
-
-          setTimeout(() => {
-            textarea.selectionStart = textarea.selectionEnd =
-              start + 1 + indent.length;
-            updateCursorPosition();
-          }, 0);
+      // Preserve current line leading indentation across newlines for multi-line snippets
+      let formattedText = text;
+      if (text.includes('\n')) {
+        const lineStart = val.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
+        const currentLineBeforeCursor = val.slice(lineStart, start);
+        const leadingIndent = currentLineBeforeCursor.match(/^\s*/)?.[0] || '';
+        if (leadingIndent) {
+          const lines = text.split('\n');
+          formattedText = lines
+            .map((line, idx) => (idx === 0 || line.length === 0 ? line : leadingIndent + line))
+            .join('\n');
         }
       }
-    };
 
-    useImperativeHandle(ref, () => ({
-      insertTextAtCursor: (text: string, cursorOffset: number = 0) => {
-        const textarea = textareaRef.current;
-        if (!textarea) return;
+      const isEnter = formattedText.includes('\n');
+      if (isEnter) {
+        isEnterKeyRef.current = true;
+      }
 
-        const start = textarea.selectionStart;
-        const end = textarea.selectionEnd;
-        const val = textarea.value;
+      const updated = val.substring(0, start) + formattedText + val.substring(end);
+      onChange(updated);
 
-        if (start !== end && ['()', '[]', '{}', '""', "''"].includes(text)) {
-          const selected = val.substring(start, end);
-          const openChar = text[0];
-          const closeChar = text[1];
-          const updated =
-            val.substring(0, start) +
-            openChar +
-            selected +
-            closeChar +
-            val.substring(end);
-          onChangeContent(updated);
-          setTimeout(() => {
-            textarea.selectionStart = start + 1;
-            textarea.selectionEnd = end + 1;
-            textarea.focus();
-            updateCursorPosition();
-          }, 0);
-          return;
-        }
+      setTimeout(() => {
+        textarea.focus({ preventScroll: true });
+        const nextPos = start + formattedText.length;
+        textarea.setSelectionRange(nextPos, nextPos);
+        lastSelectionStartRef.current = nextPos;
+        const nextLine = updateActiveLine(updated, nextPos);
+        applyAutoScroll(isEnter);
+        scrollActiveLineIntoView(nextLine);
+      }, 0);
+    },
+    focus: () => {
+      textareaRef.current?.focus();
+    },
+    getValue: () => textareaRef.current?.value || '',
+    setValue: (val: string) => {
+      onChange(val);
+    },
+    getSelection: () => {
+      const textarea = textareaRef.current;
+      return {
+        start: textarea?.selectionStart || 0,
+        end: textarea?.selectionEnd || 0,
+      };
+    },
+  }));
 
-        const updated = val.substring(0, start) + text + val.substring(end);
-        onChangeContent(updated);
+  // Calculate current active line based on cursor position
+  const updateActiveLine = (text: string, pos: number): number => {
+    const lineNum = text.slice(0, pos).split('\n').length;
+    setActiveLine(lineNum);
+    return lineNum;
+  };
 
+  const syncSelectionState = (): { line: number; changed: boolean } => {
+    const textarea = textareaRef.current;
+    if (!textarea) return { line: activeLine, changed: false };
+    const pos = textarea.selectionStart;
+    const changed = pos !== lastSelectionStartRef.current;
+    lastSelectionStartRef.current = pos;
+    const line = updateActiveLine(textarea.value, pos);
+    return { line, changed };
+  };
+
+  // Keyboard navigation & PEP 8 Auto-indentation
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const val = textarea.value;
+    const spaces = ' '.repeat(indentSpaces);
+
+    // Tab key: Insert spaces or indent selection
+    if (e.key === 'Tab') {
+      e.preventDefault();
+
+      if (start === end) {
+        const updated = val.substring(0, start) + spaces + val.substring(end);
+        onChange(updated);
         setTimeout(() => {
-          const newPos = start + text.length - cursorOffset;
-          textarea.selectionStart = textarea.selectionEnd = newPos;
-          textarea.focus();
-          updateCursorPosition();
+          const nextPos = start + indentSpaces;
+          textarea.setSelectionRange(nextPos, nextPos);
+          lastSelectionStartRef.current = nextPos;
+          const nextLine = updateActiveLine(updated, nextPos);
+          applyAutoScroll(false);
+          scrollActiveLineIntoView(nextLine);
         }, 0);
-      },
+      } else {
+        const beforeSelection = val.substring(0, start);
+        const lineStart = beforeSelection.lastIndexOf('\n') + 1;
+        const selectedText = val.substring(lineStart, end);
+        const lines = selectedText.split('\n');
 
-      indentSelection: () => {
-        const textarea = textareaRef.current;
-        if (!textarea) return;
-        const start = textarea.selectionStart;
-        const val = textarea.value;
-        const updated = val.substring(0, start) + '    ' + val.substring(start);
-        onChangeContent(updated);
-        setTimeout(() => {
-          textarea.selectionStart = textarea.selectionEnd = start + 4;
-          textarea.focus();
-          updateCursorPosition();
-        }, 0);
-      },
-
-      unindentSelection: () => {
-        const textarea = textareaRef.current;
-        if (!textarea) return;
-        const start = textarea.selectionStart;
-        const val = textarea.value;
-        const lineStart = val.lastIndexOf('\n', start - 1) + 1;
-        const lineChunk = val.substring(lineStart, lineStart + 4);
-        if (lineChunk === '    ') {
-          const updated =
-            val.substring(0, lineStart) + val.substring(lineStart + 4);
-          onChangeContent(updated);
-          setTimeout(() => {
-            textarea.selectionStart = textarea.selectionEnd = Math.max(
-              lineStart,
-              start - 4
-            );
-            textarea.focus();
-            updateCursorPosition();
-          }, 0);
+        if (e.shiftKey) {
+          const unindented = lines.map(line => line.startsWith(spaces) ? line.slice(indentSpaces) : line).join('\n');
+          const updated = val.substring(0, lineStart) + unindented + val.substring(end);
+          onChange(updated);
+        } else {
+          const indented = lines.map(line => spaces + line).join('\n');
+          const updated = val.substring(0, lineStart) + indented + val.substring(end);
+          onChange(updated);
         }
-      },
+      }
+      return;
+    }
 
-      getText: () => activeFile?.content || '',
-      setText: (newText: string) => onChangeContent(newText),
-    }));
+    // Enter key: PEP 8 Auto-indentation
+    if (e.key === 'Enter') {
+      isEnterKeyRef.current = true;
+      const textBeforeCursor = val.substring(0, start);
+      const currentLineStart = textBeforeCursor.lastIndexOf('\n') + 1;
+      const currentLine = textBeforeCursor.substring(currentLineStart);
 
-    const lines = (activeFile?.content || '').split('\n');
-    const totalLines = lines.length;
+      const matchIndent = currentLine.match(/^\s*/);
+      let currentIndent = matchIndent ? matchIndent[0] : '';
 
-    // Tokenized syntax highlighted lines
-    const highlightedCode = useMemo(() => {
-      let inDocstring = false;
-      return lines.map((l, idx) => {
-        const res = highlightPythonLine(l, theme, inDocstring);
-        inDocstring = res.endsInDocstring;
-        return (
-          <div key={idx} className="leading-[1.6]">
-            {res.elements.length > 0 ? res.elements : ' '}
-          </div>
-        );
-      });
-    }, [activeFile?.content, theme]);
+      if (currentLine.trim().endsWith(':')) {
+        currentIndent += spaces;
+      }
 
-    const handleCopyAll = () => {
-      navigator.clipboard.writeText(activeFile?.content || '');
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    };
+      e.preventDefault();
+      const insertText = '\n' + currentIndent;
+      const updated = val.substring(0, start) + insertText + val.substring(end);
+      onChange(updated);
 
-    const handleReplace = () => {
-      if (!searchQuery) return;
-      const updated = (activeFile?.content || '').replaceAll(
-        searchQuery,
-        replaceQuery
-      );
-      onChangeContent(updated);
-    };
+      setTimeout(() => {
+        const nextPos = start + insertText.length;
+        textarea.setSelectionRange(nextPos, nextPos);
+        lastSelectionStartRef.current = nextPos;
+        const nextLine = updateActiveLine(updated, nextPos);
+        applyAutoScroll(true);
+        scrollActiveLineIntoView(nextLine);
+      }, 0);
+      return;
+    }
 
-    return (
+    // Backspace: Smart un-indent
+    if (e.key === 'Backspace' && start === end && start > 0) {
+      const textBeforeCursor = val.substring(0, start);
+      const currentLineStart = textBeforeCursor.lastIndexOf('\n') + 1;
+      const lineUpToCursor = textBeforeCursor.substring(currentLineStart);
+
+      if (/^\s+$/.test(lineUpToCursor) && lineUpToCursor.length >= indentSpaces && lineUpToCursor.length % indentSpaces === 0) {
+        e.preventDefault();
+        const updated = val.substring(0, start - indentSpaces) + val.substring(end);
+        onChange(updated);
+        setTimeout(() => {
+          const nextPos = start - indentSpaces;
+          textarea.setSelectionRange(nextPos, nextPos);
+          lastSelectionStartRef.current = nextPos;
+          const nextLine = updateActiveLine(updated, nextPos);
+          scrollActiveLineIntoView(nextLine);
+        }, 0);
+        return;
+      }
+    }
+  };
+
+  const lineCount = Math.max(code.split('\n').length, 1);
+
+  // Memoize highlighted HTML so scrolling NEVER triggers re-highlighting or DOM thrashing
+  const highlightedHtml = useMemo(() => {
+    if (!code) return ' ';
+    return highlightPythonCode(code, colors, []);
+  }, [code, colors]);
+
+  return (
+    <div
+      className="relative flex-1 min-h-0 w-full h-full flex flex-col overflow-hidden select-text"
+      style={{
+        backgroundColor: colors.background,
+        color: colors.foreground,
+      }}
+    >
+      {/* Quick Jump to Line 1 when scrolled down on long files */}
+      {isScrolledFar && (
+        <button
+          type="button"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => {
+            if (verticalScrollRef.current) {
+              verticalScrollRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+            }
+          }}
+          className="absolute top-2.5 right-2.5 z-20 flex items-center space-x-1 px-2 py-1.5 rounded-lg bg-[#1d1e2c]/90 hover:bg-[#2a2b40] text-amber-300 border border-amber-400/40 shadow-lg backdrop-blur-sm text-[11px] font-sans font-bold transition active:scale-95 cursor-pointer"
+          title="Cuộn nhanh về dòng 1"
+        >
+          <ArrowUpToLine className="w-3.5 h-3.5" />
+          <span>Dòng 1</span>
+        </button>
+      )}
+
+      {/* Unified Vertical Scroll Container (Gutter + Code scroll in 100% hardware lockstep, zero endless overscroll) */}
       <div
-        className="flex-1 flex flex-col h-full overflow-hidden select-none"
-        style={{ backgroundColor: theme.background }}
+        ref={verticalScrollRef}
+        onScroll={(e) => {
+          const far = e.currentTarget.scrollTop > 180;
+          setIsScrolledFar((prev) => (prev === far ? prev : far));
+        }}
+        onTouchStart={(e) => {
+          const t = e.touches[0];
+          if (t) {
+            touchStartPosRef.current = { x: t.clientX, y: t.clientY };
+          }
+          isUserDraggingTouchRef.current = false;
+        }}
+        onTouchMove={(e) => {
+          const t = e.touches[0];
+          if (!t) return;
+          const dx = Math.abs(t.clientX - touchStartPosRef.current.x);
+          const dy = Math.abs(t.clientY - touchStartPosRef.current.y);
+          if (dx > 6 || dy > 6) {
+            // Người dùng đang vuốt cuộn màn hình -> hủy mọi timer snap để vuốt về đầu dòng mượt mà
+            isUserDraggingTouchRef.current = true;
+            clearPendingFocusTimers();
+          }
+        }}
+        onTouchEnd={() => {
+          window.setTimeout(() => {
+            isUserDraggingTouchRef.current = false;
+          }, 120);
+        }}
+        className="relative flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden ide-scroll-y"
       >
-        {/* File Tabs & Editor Controls */}
-        <div className="flex items-center justify-between bg-[#131620] border-b border-slate-800/80 px-2 pt-1 shrink-0 select-none">
-          <div className="flex items-center space-x-1 overflow-x-auto no-scrollbar max-w-[70vw]">
-            {files.map((file) => {
-              const isActive = file.id === activeFileId;
-              return (
-                <div
-                  key={file.id}
-                  onClick={() => onSelectFile(file.id)}
-                  className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-t-lg text-xs font-mono cursor-pointer transition-all border-t-2 ${
-                    isActive
-                      ? 'bg-[#181d28] text-amber-300 font-bold border-amber-400 shadow-sm'
-                      : 'bg-[#151822] text-slate-400 hover:text-slate-200 border-transparent hover:bg-[#1a1f2c]'
-                  }`}
-                >
-                  <FileCode className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                  <span className="truncate max-w-[110px]">{file.name}</span>
-                  {files.length > 1 && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onCloseFile(file.id);
-                      }}
-                      className="p-0.5 hover:text-rose-400 rounded transition"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  )}
-                </div>
-              );
-            })}
-
-            <button
-              onClick={onAddFile}
-              title="Thêm file mới (.py)"
-              className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition"
-            >
-              <Plus className="w-3.5 h-3.5" />
-            </button>
-          </div>
-
-          <div className="flex items-center space-x-1 text-slate-400 pb-1">
-            <button
-              onClick={() => setShowSearch(!showSearch)}
-              title="Tìm kiếm & Thay thế"
-              className={`p-1.5 rounded hover:bg-slate-800 transition ${
-                showSearch ? 'text-amber-400 bg-slate-800' : ''
-              }`}
-            >
-              <Search className="w-3.5 h-3.5" />
-            </button>
-            <button
-              onClick={handleCopyAll}
-              title="Sao chép toàn bộ mã nguồn"
-              className="p-1.5 rounded hover:bg-slate-800 transition"
-            >
-              {copied ? (
-                <Check className="w-3.5 h-3.5 text-emerald-400" />
-              ) : (
-                <Copy className="w-3.5 h-3.5" />
-              )}
-            </button>
-          </div>
-        </div>
-
-        {/* Search & Replace Floating Bar */}
-        {showSearch && (
-          <div className="bg-[#1b202c] border-b border-slate-700/70 p-2 flex flex-wrap items-center gap-2 text-xs">
-            <input
-              type="text"
-              placeholder="Tìm kiếm..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="bg-[#0e1117] border border-slate-700 rounded px-2.5 py-1 text-slate-200 focus:outline-none focus:border-amber-400 font-mono text-xs"
-            />
-            <input
-              type="text"
-              placeholder="Thay thế bằng..."
-              value={replaceQuery}
-              onChange={(e) => setReplaceQuery(e.target.value)}
-              className="bg-[#0e1117] border border-slate-700 rounded px-2.5 py-1 text-slate-200 focus:outline-none focus:border-amber-400 font-mono text-xs"
-            />
-            <button
-              onClick={handleReplace}
-              className="px-2.5 py-1 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded transition"
-            >
-              Thay thế
-            </button>
-            <button
-              onClick={() => setShowSearch(false)}
-              className="p-1 text-slate-400 hover:text-slate-200 ml-auto"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        )}
-
-        {/* Editor Main Canvas (Line Numbers + Highlighted Textarea) */}
-        <div className="flex-1 flex overflow-hidden relative">
-          {/* Line Numbers Bar (Screenshot 2: Yellow line numbers) */}
+        <div className="flex w-full min-h-full items-stretch">
+          {/* Line Numbers Gutter */}
           <div
-            ref={lineNumbersRef}
-            className="w-12 bg-[#0e1017] text-amber-400 font-bold select-none py-3 pr-2.5 text-right font-mono border-r border-slate-800/80 overflow-hidden shrink-0"
-            style={{ fontSize: `${fontSize}px`, lineHeight: '1.6' }}
+            aria-hidden="true"
+            className="w-11 sm:w-13 select-none shrink-0 border-r border-[#262630] py-3 text-right pr-2 text-xs font-mono"
+            style={{
+              backgroundColor: colors.gutterBg,
+              color: colors.gutterFg,
+              lineHeight: `${lineHeightPx}px`,
+              fontFamily,
+              fontSize: `${fontSize * 0.85}px`,
+            }}
           >
-            {Array.from({ length: Math.max(totalLines, 1) }).map((_, i) => {
-              const lineNum = i + 1;
-              const isErrorLine = highlightLine === lineNum;
+            {Array.from({ length: lineCount }, (_, idx) => {
+              const num = idx + 1;
               return (
                 <div
-                  key={lineNum}
-                  className={`transition-colors ${
-                    isErrorLine
-                      ? 'text-rose-400 bg-rose-500/20 rounded px-1'
-                      : 'text-amber-400'
+                  key={num}
+                  className={`flex items-center justify-end ${
+                    num === activeLine
+                      ? 'font-bold text-amber-400'
+                      : 'opacity-60'
                   }`}
+                  style={{ height: `${lineHeightPx}px` }}
                 >
-                  {lineNum}
+                  <span>{num}</span>
                 </div>
               );
             })}
           </div>
 
-          {/* Syntax Highlighted Backdrop + Real-time Interactive Textarea */}
-          <div className="flex-1 relative overflow-hidden">
-            {/* Colorized Backdrop */}
-            <div
-              ref={backdropRef}
-              className="absolute inset-0 p-3 font-mono leading-[1.6] whitespace-pre overflow-hidden pointer-events-none select-none"
-              style={{
-                fontSize: `${fontSize}px`,
-                tabSize: 4,
-              }}
-            >
-              {highlightedCode}
+          {/* Horizontal Scroll Container for Code */}
+          <div
+            ref={horizontalScrollRef}
+            className="relative flex-1 min-w-0 overflow-x-auto overflow-y-hidden ide-scroll-x"
+          >
+            {/* Exact-Sized Canvas Wrapper: sized cleanly by <pre> in normal flow so height never exceeds actual code */}
+            <div className="relative w-max min-w-full min-h-full">
+              {/* Active Line Highlight Bar (locked to content coordinates) */}
+              <div
+                aria-hidden="true"
+                className="absolute left-0 right-0 pointer-events-none"
+                style={{
+                  top: `${(activeLine - 1) * lineHeightPx + 12}px`,
+                  height: `${lineHeightPx}px`,
+                  backgroundColor: colors.lineHighlight,
+                  opacity: 0.7,
+                  zIndex: 0,
+                }}
+              />
+
+              {/* Syntax Highlighted Backdrop (<pre> in normal flow defines exact width & height) */}
+              <pre
+                aria-hidden="true"
+                className="relative m-0 py-3 pl-3 pr-8 pointer-events-none select-none whitespace-pre font-mono z-1"
+                style={{
+                  lineHeight: `${lineHeightPx}px`,
+                  fontSize: `${fontSize}px`,
+                  fontFamily,
+                  color: colors.foreground,
+                }}
+                dangerouslySetInnerHTML={{
+                  __html: highlightedHtml,
+                }}
+              />
+
+              {/* Native Interactive Textarea (overflow-hidden so all scrolling uses unified smooth container) */}
+              <textarea
+                ref={textareaRef}
+                value={code}
+                wrap="off"
+                onChange={(e) => {
+                  const val = e.target.value;
+                  onChange(val);
+                  const pos = e.target.selectionStart;
+                  lastSelectionStartRef.current = pos;
+                  const lineNum = updateActiveLine(val, pos);
+                  requestAnimationFrame(() => {
+                    applyAutoScroll();
+                    scrollActiveLineIntoView(lineNum);
+                  });
+                }}
+                onFocus={() => {
+                  clearPendingFocusTimers();
+                  requestAnimationFrame(() => {
+                    const { line } = syncSelectionState();
+                    scrollActiveLineIntoView(line);
+                    applyAutoScroll();
+                  });
+                  // Bù trễ cho hiệu ứng trượt lên của bàn phím ảo trên Android APK
+                  [180, 380].forEach((delay) => {
+                    const t = window.setTimeout(() => {
+                      if (!isUserDraggingTouchRef.current && document.activeElement === textareaRef.current) {
+                        const { line } = syncSelectionState();
+                        scrollActiveLineIntoView(line);
+                      }
+                    }, delay);
+                    focusTimersRef.current.push(t);
+                  });
+                }}
+                onKeyDown={handleKeyDown}
+                onKeyUp={() => {
+                  const { line } = syncSelectionState();
+                  applyAutoScroll();
+                  scrollActiveLineIntoView(line);
+                }}
+                onClick={() => {
+                  const { line } = syncSelectionState();
+                  scrollActiveLineIntoView(line);
+                }}
+                onSelect={() => {
+                  if (!isUserDraggingTouchRef.current && document.activeElement === textareaRef.current) {
+                    const { line, changed } = syncSelectionState();
+                    if (changed) {
+                      applyAutoScroll();
+                      scrollActiveLineIntoView(line);
+                    }
+                  }
+                }}
+                spellCheck={false}
+                autoCapitalize="none"
+                autoCorrect="off"
+                autoComplete="off"
+                className="absolute inset-0 w-full h-full py-3 pl-3 pr-8 m-0 border-0 outline-none resize-none whitespace-pre font-mono z-2 bg-transparent overflow-hidden"
+                style={{
+                  color: 'transparent',
+                  caretColor: '#38bdf8',
+                  lineHeight: `${lineHeightPx}px`,
+                  fontSize: `${fontSize}px`,
+                  fontFamily,
+                }}
+              />
             </div>
-
-            {/* Transparent Textarea for seamless typing, cursor, and selection */}
-            <textarea
-              ref={textareaRef}
-              value={activeFile?.content || ''}
-              onChange={(e) => {
-                onChangeContent(e.target.value);
-                updateCursorPosition();
-              }}
-              onKeyUp={updateCursorPosition}
-              onClick={updateCursorPosition}
-              onScroll={handleScroll}
-              onKeyDown={handleKeyDown}
-              spellCheck={false}
-              autoCapitalize="none"
-              autoComplete="off"
-              autoCorrect="off"
-              className="absolute inset-0 w-full h-full bg-transparent text-transparent caret-amber-400 p-3 outline-none resize-none font-mono leading-[1.6] whitespace-pre tab-4 select-text selection:bg-amber-500/30 selection:text-white"
-              style={{
-                fontSize: `${fontSize}px`,
-                tabSize: 4,
-              }}
-              placeholder="# Viết mã Python tại đây..."
-            />
-          </div>
-        </div>
-
-        {/* Editor Status Bar */}
-        <div className="bg-[#0f1118] border-t border-slate-800/80 px-3 py-1 text-[11px] text-slate-400 flex items-center justify-between select-none shrink-0 font-mono">
-          <div className="flex items-center space-x-3">
-            <span className="text-amber-400 font-bold">
-              Ln {cursorPos.line}, Col {cursorPos.col}
-            </span>
-            <span>{totalLines} dòng</span>
-          </div>
-          <div className="flex items-center space-x-2">
-            <span>UTF-8</span>
-            <span className="px-1.5 py-0.2 rounded bg-slate-800 text-amber-400 text-[10px] font-bold">
-              Python 3.10
-            </span>
           </div>
         </div>
       </div>
-    );
-  }
-);
+    </div>
+  );
+});
+
+Editor.displayName = 'Editor';

@@ -1,8 +1,12 @@
 package com.example.filemanager.ui.explorer
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.graphics.Bitmap
+import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -53,6 +57,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.MainActivity
+import com.example.SecondaryWindowActivity
 import com.example.filemanager.apk.ApkInstaller
 import com.example.filemanager.model.*
 import com.example.filemanager.ui.archive.CreateArchiveDialog
@@ -327,7 +332,7 @@ fun FileExplorerScreen(
                     selected = false,
                     onClick = {
                         coroutineScope.launch { drawerState.close() }
-                        openNewAppWindow(context)
+                        openNewAppWindow(context, currentDir.absolutePath)
                     },
                     modifier = Modifier.padding(horizontal = 12.dp)
                 )
@@ -491,7 +496,7 @@ fun FileExplorerScreen(
                                         leadingIcon = { Icon(Icons.Default.Launch, null, tint = CyanAccent) },
                                         onClick = {
                                             showMoreMenu = false
-                                            openNewAppWindow(context)
+                                            openNewAppWindow(context, currentDir.absolutePath)
                                         }
                                     )
                                     DropdownMenuItem(
@@ -654,11 +659,23 @@ fun FileExplorerScreen(
             containerColor = DocumentsUIDarkBg,
             contentWindowInsets = WindowInsets.navigationBars
         ) { paddingValues ->
-            Column(
+            BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(paddingValues)
+                    .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
             ) {
+                val isLandscape = maxWidth > maxHeight && maxWidth >= 560.dp
+
+                LaunchedEffect(isLandscape, isDualPane) {
+                    if (isDualPane) {
+                        viewModel.syncDualPaneSplitForOrientation(isLandscape)
+                    }
+                }
+
+                Column(
+                    modifier = Modifier.fillMaxSize()
+                ) {
                 // Operation progress bar
                 if (operationProgress.isRunning) {
                     LinearProgressIndicator(
@@ -1035,6 +1052,7 @@ fun FileExplorerScreen(
                     }
                 }
             }
+            }
         }
     }
 
@@ -1127,7 +1145,7 @@ fun FileExplorerScreen(
                     OutlinedButton(
                         onClick = {
                             showConnectionsDialog = false
-                            openNewAppWindow(context)
+                            openNewAppWindow(context, currentDir.absolutePath)
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -2499,27 +2517,52 @@ fun FileIcon(item: FileItem, isSelected: Boolean, modifier: Modifier = Modifier)
     )
 }
 
+private tailrec fun Context.findActivityOrNull(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivityOrNull()
+    else -> null
+}
+
 /**
- * Launches a brand new separate Android Activity instance in native Multi-Window
+ * Launches a genuinely separate, independent File Manager Pro window task.
  */
-fun openNewAppWindow(context: Context) {
+fun openNewAppWindow(context: Context, initialDirPath: String? = null) {
+    val currentActivity = context.findActivityOrNull()
+    val targetClass = if (currentActivity is SecondaryWindowActivity) {
+        MainActivity::class.java
+    } else {
+        SecondaryWindowActivity::class.java
+    }
+    val baseFlags = Intent.FLAG_ACTIVITY_NEW_TASK or
+        Intent.FLAG_ACTIVITY_MULTIPLE_TASK or
+        Intent.FLAG_ACTIVITY_NEW_DOCUMENT
+    val isAlreadyMultiWindow = currentActivity?.isInMultiWindowMode == true
+
+    val intent = Intent(context, targetClass).apply {
+        data = Uri.parse("filemanagerpro://window/${System.currentTimeMillis()}")
+        putExtra(SecondaryWindowActivity.EXTRA_START_IN_FILES, true)
+        if (!initialDirPath.isNullOrBlank()) {
+            putExtra(SecondaryWindowActivity.EXTRA_INITIAL_PATH, initialDirPath)
+        }
+        addFlags(if (isAlreadyMultiWindow) baseFlags or Intent.FLAG_ACTIVITY_LAUNCH_ADJACENT else baseFlags)
+    }
+
     try {
-        val intent = Intent(context, MainActivity::class.java).apply {
-            action = Intent.ACTION_MAIN
-            addCategory(Intent.CATEGORY_LAUNCHER)
-            addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK or
-                Intent.FLAG_ACTIVITY_MULTIPLE_TASK or
-                Intent.FLAG_ACTIVITY_NEW_DOCUMENT or
-                Intent.FLAG_ACTIVITY_LAUNCH_ADJACENT
-            )
-        }
         context.startActivity(intent)
-    } catch (e: Exception) {
-        val intent = Intent(context, MainActivity::class.java).apply {
-            action = Intent.ACTION_MAIN
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
+        Toast.makeText(
+            context,
+            "Đã mở cửa sổ File Manager Pro độc lập mới (xem trong Đa nhiệm)",
+            Toast.LENGTH_SHORT
+        ).show()
+    } catch (_: Exception) {
+        val fallbackIntent = Intent(context, targetClass).apply {
+            data = Uri.parse("filemanagerpro://window/${System.nanoTime()}")
+            putExtra(SecondaryWindowActivity.EXTRA_START_IN_FILES, true)
+            if (!initialDirPath.isNullOrBlank()) {
+                putExtra(SecondaryWindowActivity.EXTRA_INITIAL_PATH, initialDirPath)
+            }
+            addFlags(baseFlags)
         }
-        context.startActivity(intent)
+        context.startActivity(fallbackIntent)
     }
 }

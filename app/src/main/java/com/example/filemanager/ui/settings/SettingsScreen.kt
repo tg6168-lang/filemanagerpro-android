@@ -16,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -27,6 +28,7 @@ import com.example.filemanager.ui.components.PremiumSectionHeader
 import com.example.filemanager.ui.extensions.GitHubEnvSettingsDialog
 import com.example.filemanager.ui.extensions.GitHubExtensionSummaryCard
 import com.example.filemanager.ui.extensions.GoogleAccountPortalCard
+import com.example.filemanager.viewmodel.AppOrientationMode
 import com.example.filemanager.viewmodel.MainViewModel
 import com.example.ui.theme.*
 
@@ -39,6 +41,7 @@ fun SettingsScreen(
 ) {
     val showHidden by viewModel.showHiddenFiles.collectAsState()
     val isGridView by viewModel.isGridView.collectAsState()
+    val orientationMode by viewModel.orientationMode.collectAsState()
     val currentDirectory by viewModel.currentDirectory.collectAsState()
     val gitHubState by viewModel.gitHubPushManager.state.collectAsState()
     var showGitHubDialog by remember { mutableStateOf(false) }
@@ -159,6 +162,50 @@ fun SettingsScreen(
                                     onCheckedChange = { viewModel.toggleGridView() },
                                     colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = GoldAccent)
                                 )
+                            }
+
+                            HorizontalDivider(color = CharcoalDivider, modifier = Modifier.padding(vertical = 10.dp))
+
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text("Hướng hiển thị màn hình", color = TextPrimary, fontWeight = FontWeight.Medium)
+                                Text("Tự động xoay theo cảm biến hoặc khóa cố định Chân dung / Xoay ngang", color = TextMuted, fontSize = 12.sp)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    AppOrientationMode.entries.forEach { mode ->
+                                        val isSelected = orientationMode == mode
+                                        val chipColor = when (mode) {
+                                            AppOrientationMode.AUTO -> VioletGlow
+                                            AppOrientationMode.PORTRAIT -> CyanAccent
+                                            AppOrientationMode.LANDSCAPE -> GoldAccent
+                                        }
+                                        OutlinedButton(
+                                            onClick = { viewModel.setOrientationMode(mode) },
+                                            shape = RoundedCornerShape(10.dp),
+                                            border = BorderStroke(
+                                                width = if (isSelected) 1.4.dp else 1.dp,
+                                                color = if (isSelected) chipColor else CharcoalSurfaceHighlight
+                                            ),
+                                            colors = ButtonDefaults.outlinedButtonColors(
+                                                containerColor = if (isSelected) chipColor.copy(alpha = 0.18f) else CharcoalBackground,
+                                                contentColor = if (isSelected) chipColor else TextSecondary
+                                            ),
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .heightIn(min = 48.dp)
+                                                .testTag("settings_orientation_${mode.name.lowercase()}")
+                                        ) {
+                                            Text(
+                                                text = mode.label,
+                                                fontSize = 11.5.sp,
+                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                                maxLines = 1
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

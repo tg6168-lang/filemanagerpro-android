@@ -1,11 +1,15 @@
 package com.example
 
+import android.app.Activity
+import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -16,6 +20,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
@@ -29,6 +34,7 @@ import com.example.filemanager.ui.home.HomeScreen
 import com.example.filemanager.ui.settings.SettingsScreen
 import com.example.filemanager.ui.source.SourcePackageScreen
 import com.example.filemanager.ui.viewers.*
+import com.example.filemanager.viewmodel.AppOrientationMode
 import com.example.filemanager.viewmodel.MainViewModel
 import com.example.filemanager.viewmodel.ScreenDestination
 import com.example.ui.theme.*
@@ -48,10 +54,28 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        if (savedInstanceState == null) {
+            handleLaunchIntent(intent)
+        }
+
         setContent {
             FileManagerProTheme {
                 MainAppContainer(viewModel = viewModel)
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleLaunchIntent(intent)
+    }
+
+    private fun handleLaunchIntent(intent: Intent?) {
+        val startInFiles = intent?.getBooleanExtra(SecondaryWindowActivity.EXTRA_START_IN_FILES, false) ?: false
+        val initialPath = intent?.getStringExtra(SecondaryWindowActivity.EXTRA_INITIAL_PATH)
+        if (startInFiles || !initialPath.isNullOrBlank()) {
+            viewModel.initFromWindowIntent(startInFiles = startInFiles, initialPath = initialPath)
         }
     }
 }
@@ -60,9 +84,19 @@ class MainActivity : ComponentActivity() {
 fun MainAppContainer(viewModel: MainViewModel) {
     val currentScreen by viewModel.currentScreen.collectAsState()
     val currentDir by viewModel.currentDirectory.collectAsState()
+    val orientationMode by viewModel.orientationMode.collectAsState()
 
     val context = androidx.compose.ui.platform.LocalContext.current
+    val activity = context as? Activity
     var lastBackPressTime by remember { mutableLongStateOf(0L) }
+
+    LaunchedEffect(orientationMode, activity) {
+        activity?.requestedOrientation = when (orientationMode) {
+            AppOrientationMode.AUTO -> ActivityInfo.SCREEN_ORIENTATION_SENSOR
+            AppOrientationMode.PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            AppOrientationMode.LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        }
+    }
 
     BackHandler {
         if (viewModel.canNavigateBack()) {
@@ -104,31 +138,110 @@ fun MainAppContainer(viewModel: MainViewModel) {
         )
     }
 
-    // Bottom navigation is shown on Home, Analyzer, and SourcePackage screens.
-    // On Files screen, bottom bar remains hidden to maximize screen area for files.
-    val showBottomBar = (currentScreen is ScreenDestination.Home ||
+    // Navigation bar/rail is shown on Home, Analyzer, and SourcePackage screens.
+    // On Files screen, nav remains hidden to maximize screen area for files.
+    val showNav = (currentScreen is ScreenDestination.Home ||
         currentScreen is ScreenDestination.Analyzer ||
         currentScreen is ScreenDestination.SourcePackage) &&
         currentScreen !is ScreenDestination.Files
 
-    Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        bottomBar = {
-            if (showBottomBar) {
-                Surface(
-                    color = ObsidianDeep,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .windowInsetsPadding(WindowInsets.navigationBars)
-                ) {
-                    Column {
-                        HorizontalDivider(color = CharcoalSurfaceHighlight, thickness = 0.9.dp)
-                        Row(
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val isLandscape = maxWidth > maxHeight && maxWidth >= 560.dp
+
+        Scaffold(
+            modifier = Modifier.fillMaxSize(),
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
+            bottomBar = {
+                if (showNav && !isLandscape) {
+                    Surface(
+                        color = ObsidianDeep,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .windowInsetsPadding(WindowInsets.navigationBars)
+                    ) {
+                        Column {
+                            HorizontalDivider(color = CharcoalSurfaceHighlight, thickness = 0.9.dp)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(58.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                bottomNavItems.forEach { item ->
+                                    val isSelected = when (item.destination) {
+                                        is ScreenDestination.Home -> currentScreen is ScreenDestination.Home
+                                        is ScreenDestination.Files -> currentScreen is ScreenDestination.Files
+                                        is ScreenDestination.Analyzer -> currentScreen is ScreenDestination.Analyzer
+                                        is ScreenDestination.SourcePackage -> currentScreen is ScreenDestination.SourcePackage
+                                        else -> false
+                                    }
+
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxHeight()
+                                            .clickable { viewModel.navigateTo(item.destination) },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Column(
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            verticalArrangement = Arrangement.Center
+                                        ) {
+                                            Surface(
+                                                shape = RoundedCornerShape(12.dp),
+                                                color = if (isSelected) item.accentColor.copy(alpha = 0.18f) else Color.Transparent,
+                                                modifier = Modifier.size(width = 48.dp, height = 28.dp)
+                                            ) {
+                                                Box(contentAlignment = Alignment.Center) {
+                                                    Icon(
+                                                        item.icon,
+                                                        contentDescription = item.title,
+                                                        tint = if (isSelected) item.accentColor else TextMuted,
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
+                                                }
+                                            }
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                text = item.title,
+                                                fontSize = 10.5.sp,
+                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                                color = if (isSelected) item.accentColor else TextMuted
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            containerColor = CharcoalBackground
+        ) { innerPadding ->
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(bottom = innerPadding.calculateBottomPadding())
+            ) {
+                if (showNav && isLandscape) {
+                    Surface(
+                        color = ObsidianDeep,
+                        border = BorderStroke(0.8.dp, CharcoalSurfaceHighlight),
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .windowInsetsPadding(
+                                WindowInsets.displayCutout.only(WindowInsetsSides.Start)
+                                    .union(WindowInsets.navigationBars.only(WindowInsetsSides.Start))
+                            )
+                            .width(78.dp)
+                    ) {
+                        Column(
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .height(58.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                                .fillMaxSize()
+                                .windowInsetsPadding(WindowInsets.statusBars)
+                                .padding(vertical = 12.dp, horizontal = 6.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterVertically),
+                            horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             bottomNavItems.forEach { item ->
                                 val isSelected = when (item.destination) {
@@ -138,55 +251,43 @@ fun MainAppContainer(viewModel: MainViewModel) {
                                     is ScreenDestination.SourcePackage -> currentScreen is ScreenDestination.SourcePackage
                                     else -> false
                                 }
-
-                                Box(
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
                                     modifier = Modifier
-                                        .weight(1f)
-                                        .fillMaxHeight()
-                                        .clickable { viewModel.navigateTo(item.destination) },
-                                    contentAlignment = Alignment.Center
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .clickable { viewModel.navigateTo(item.destination) }
+                                        .padding(vertical = 8.dp)
                                 ) {
-                                    Column(
-                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                        verticalArrangement = Arrangement.Center
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = if (isSelected) item.accentColor.copy(alpha = 0.18f) else Color.Transparent,
+                                        modifier = Modifier.size(width = 48.dp, height = 30.dp)
                                     ) {
-                                        Surface(
-                                            shape = RoundedCornerShape(12.dp),
-                                            color = if (isSelected) item.accentColor.copy(alpha = 0.18f) else Color.Transparent,
-                                            modifier = Modifier.size(width = 48.dp, height = 28.dp)
-                                        ) {
-                                            Box(contentAlignment = Alignment.Center) {
-                                                Icon(
-                                                    item.icon,
-                                                    contentDescription = item.title,
-                                                    tint = if (isSelected) item.accentColor else TextMuted,
-                                                    modifier = Modifier.size(20.dp)
-                                                )
-                                            }
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                item.icon,
+                                                contentDescription = item.title,
+                                                tint = if (isSelected) item.accentColor else TextMuted,
+                                                modifier = Modifier.size(20.dp)
+                                            )
                                         }
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            text = item.title,
-                                            fontSize = 10.5.sp,
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                            color = if (isSelected) item.accentColor else TextMuted
-                                        )
                                     }
+                                    Spacer(modifier = Modifier.height(3.dp))
+                                    Text(
+                                        text = item.title,
+                                        fontSize = 10.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (isSelected) item.accentColor else TextMuted
+                                    )
                                 }
                             }
                         }
                     }
                 }
-            }
-        },
-        containerColor = CharcoalBackground
-    ) { innerPadding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(bottom = innerPadding.calculateBottomPadding())
-        ) {
-            when (val screen = currentScreen) {
+
+                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                    when (val screen = currentScreen) {
                 is ScreenDestination.Home -> {
                     HomeScreen(
                         viewModel = viewModel,
@@ -305,6 +406,8 @@ fun MainAppContainer(viewModel: MainViewModel) {
                         onBack = { viewModel.navigateBack() },
                         onOpenFile = { fileItem -> viewModel.openFile(fileItem) }
                     )
+                }
+                    }
                 }
             }
         }

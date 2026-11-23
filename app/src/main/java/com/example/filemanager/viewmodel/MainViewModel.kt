@@ -44,6 +44,12 @@ enum class DualPaneSplit {
     HORIZONTAL  // Left / Right
 }
 
+enum class AppOrientationMode(val label: String) {
+    AUTO("Tự động"),
+    PORTRAIT("Chân dung"),
+    LANDSCAPE("Xoay ngang")
+}
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val prefs = application.getSharedPreferences("file_manager_pro_prefs", Context.MODE_PRIVATE)
@@ -118,6 +124,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isGridView = MutableStateFlow(prefs.getBoolean("is_grid_view", false))
     val isGridView: StateFlow<Boolean> = _isGridView.asStateFlow()
 
+    private val _orientationMode = MutableStateFlow(
+        runCatching {
+            AppOrientationMode.valueOf(prefs.getString("orientation_mode", AppOrientationMode.AUTO.name) ?: AppOrientationMode.AUTO.name)
+        }.getOrDefault(AppOrientationMode.AUTO)
+    )
+    val orientationMode: StateFlow<AppOrientationMode> = _orientationMode.asStateFlow()
+
     private val _favorites = MutableStateFlow<Set<String>>(prefs.getStringSet("favorites", emptySet()) ?: emptySet())
     val favorites: StateFlow<Set<String>> = _favorites.asStateFlow()
 
@@ -135,6 +148,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         refreshStorageVolumes()
         loadDirectory(_currentDirectory.value)
+    }
+
+    fun setOrientationMode(mode: AppOrientationMode) {
+        _orientationMode.value = mode
+        prefs.edit().putString("orientation_mode", mode.name).apply()
+    }
+
+    fun cycleOrientationMode() {
+        val next = when (_orientationMode.value) {
+            AppOrientationMode.AUTO -> AppOrientationMode.PORTRAIT
+            AppOrientationMode.PORTRAIT -> AppOrientationMode.LANDSCAPE
+            AppOrientationMode.LANDSCAPE -> AppOrientationMode.AUTO
+        }
+        setOrientationMode(next)
+    }
+
+    fun initFromWindowIntent(startInFiles: Boolean, initialPath: String?) {
+        val targetDir = initialPath?.let { File(it) }?.takeIf { it.exists() && it.isDirectory && it.canRead() }
+        if (targetDir != null) {
+            loadDirectory(targetDir)
+        }
+        if (startInFiles) {
+            _navigationHistory.clear()
+            _navigationHistory.add(ScreenDestination.Home)
+            _currentScreen.value = ScreenDestination.Files
+        }
+    }
+
+    fun syncDualPaneSplitForOrientation(isLandscape: Boolean) {
+        val target = if (isLandscape) DualPaneSplit.VERTICAL else DualPaneSplit.HORIZONTAL
+        if (_dualPaneSplit.value != target) {
+            _dualPaneSplit.value = target
+        }
     }
 
     fun navigateTo(destination: ScreenDestination) {

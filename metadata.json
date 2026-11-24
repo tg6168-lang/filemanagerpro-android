@@ -1,5 +1,6 @@
 {
-  "name": "Pydroid 3 Web",
-  "description": "Môi trường lập trình Python IDE tối ưu cho Android với hỗ trợ Trợ lý AI và WebAssembly",
+  "name": "File Manager Pro",
+  "description": "Advanced Android file manager, technical data inspector, APK analyzer, SQLite database viewer, Hex editor, and game data explorer.",
+  "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

@@ -228,16 +228,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 return true
             }
 
-            // Pop folder backstack in primary pane (retraces exact folder path entered, preserving selection across directories when in selection mode!)
-            if (_directoryBackStack.isNotEmpty()) {
-                val previousDir = _directoryBackStack.removeAt(_directoryBackStack.size - 1)
-                loadDirectory(previousDir, preserveSelection = _isMultiSelectMode.value)
+            // Exit multi-select mode if active
+            if (_isMultiSelectMode.value) {
+                _isMultiSelectMode.value = false
+                _selectedItems.value = emptySet()
                 return true
             }
 
-            // Exit multi-select mode when at the top of the folder backstack
-            if (_isMultiSelectMode.value) {
-                clearSelection()
+            // In Dual Pane mode, if Pane B is active and has backstack, pop Pane B:
+            if (_isDualPaneMode.value && _activePaneIndex.value == 1) {
+                if (_secondaryBackStack.isNotEmpty()) {
+                    val prev = _secondaryBackStack.removeAt(_secondaryBackStack.size - 1)
+                    loadSecondaryDirectory(prev)
+                    return true
+                }
+            }
+
+            // If inside a Category list (e.g. Images, APK, etc.), return to normal folder view
+            if (_activeCategoryTitle.value != null) {
+                _activeCategoryTitle.value = null
+                loadDirectory(_currentDirectory.value)
+                return true
+            }
+
+            // Pop folder backstack in primary pane (retraces exact folder path entered!)
+            if (_directoryBackStack.isNotEmpty()) {
+                val previousDir = _directoryBackStack.removeAt(_directoryBackStack.size - 1)
+                loadDirectory(previousDir)
                 return true
             }
 
@@ -245,7 +262,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val parent = _currentDirectory.value.parentFile
             val internalRoot = Environment.getExternalStorageDirectory()
             if (parent != null && parent.canRead() && _currentDirectory.value.absolutePath != internalRoot.absolutePath) {
-                loadDirectory(parent, preserveSelection = _isMultiSelectMode.value)
+                loadDirectory(parent)
                 return true
             }
 
@@ -297,7 +314,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun openStorageRoot(directory: File) {
         _directoryBackStack.clear()
         _activeCategoryTitle.value = null
-        loadDirectory(directory, preserveSelection = _isMultiSelectMode.value)
+        loadDirectory(directory)
         navigateTo(ScreenDestination.Files)
     }
 
@@ -308,7 +325,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_currentDirectory.value.absolutePath != directory.absolutePath) {
             _directoryBackStack.add(_currentDirectory.value)
         }
-        loadDirectory(directory, preserveSelection = _isMultiSelectMode.value)
+        loadDirectory(directory)
     }
 
     fun enterSecondaryDirectory(directory: File) {
@@ -676,148 +693,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putString("recent_files", trimmed.joinToString(",")).apply()
     }
 
-    fun enterSelectionMode() {
-        _isMultiSelectMode.value = true
-    }
-
-    fun toggleSelectionMode() {
-        if (_isMultiSelectMode.value) {
-            clearSelection()
-        } else {
-            enterSelectionMode()
-        }
-    }
-
     fun toggleSelectItem(item: FileItem) {
-        val current = _selectedItems.value
-        val updated = if (current.any { it.path == item.path }) {
-            current.filterNot { it.path == item.path }.toSet()
+        val set = _selectedItems.value.toMutableSet()
+        if (set.contains(item)) {
+            set.remove(item)
         } else {
-            current + item
+            set.add(item)
         }
-        _selectedItems.value = updated
+        _selectedItems.value = set
+        _isMultiSelectMode.value = set.isNotEmpty()
+    }
+
+    fun selectAll() {
+        _selectedItems.value = _fileItems.value.toSet()
         _isMultiSelectMode.value = true
-    }
-
-    fun removeSelectedPath(path: String) {
-        _selectedItems.value = _selectedItems.value.filterNot { it.path == path }.toSet()
-    }
-
-    fun selectAll(displayedInActivePane: List<FileItem>? = null) {
-        val targetItems = displayedInActivePane ?: if (_isDualPaneMode.value && _activePaneIndex.value == 1) {
-            _secondaryFileItems.value
-        } else {
-            _fileItems.value
-        }
-        val existingPaths = _selectedItems.value.map { it.path }.toSet()
-        val additions = targetItems.filterNot { existingPaths.contains(it.path) }
-        _selectedItems.value = _selectedItems.value + additions
-        _isMultiSelectMode.value = true
-    }
-
-    fun invertSelectionInDirectory(displayedItems: List<FileItem>) {
-        val dirPaths = displayedItems.map { it.path }.toSet()
-        val currentlySelected = _selectedItems.value
-        val selectedPathsInDir = currentlySelected.filter { dirPaths.contains(it.path) }.map { it.path }.toSet()
-        val keptFromOtherDirs = currentlySelected.filterNot { dirPaths.contains(it.path) }
-        val invertedInDir = displayedItems.filterNot { selectedPathsInDir.contains(it.path) }
-        _selectedItems.value = (keptFromOtherDirs + invertedInDir).toSet()
-        _isMultiSelectMode.value = true
-    }
-
-    fun deselectCurrentDirectory(displayedItems: List<FileItem>) {
-        val dirPaths = displayedItems.map { it.path }.toSet()
-        _selectedItems.value = _selectedItems.value.filterNot { dirPaths.contains(it.path) }.toSet()
     }
 
     fun clearSelection() {
         _selectedItems.value = emptySet()
         _isMultiSelectMode.value = false
-    }
-
-    fun batchMoveOrCopySelected(
-        targetDir: File,
-        isMove: Boolean,
-        windowInstanceId: String = "batch"
-    ) {
-        val items = _selectedItems.value.toList()
-        if (items.isEmpty()) return
-
-        viewModelScope.launch {
-            _operationProgress.value = OperationProgress(
-                isRunning = true,
-                title = if (isMove) "Đang di chuyển ${items.size} mục..." else "Đang sao chép ${items.size} mục...",
-                totalFiles = items.size
-            )
-
-            var successCount = 0
-            var skippedCount = 0
-            val succeededPaths = mutableListOf<String>()
-
-            withContext(Dispatchers.IO) {
-                targetDir.mkdirs()
-                val targetCanonical = runCatching { targetDir.canonicalPath }.getOrDefault(targetDir.absolutePath)
-
-                items.forEachIndexed { index, item ->
-                    val src = File(item.path)
-                    _operationProgress.value = _operationProgress.value.copy(
-                        currentFileIndex = index + 1,
-                        currentFileName = item.name,
-                        progress = (index + 1).toFloat() / items.size.toFloat()
-                    )
-                    if (!src.exists()) return@forEachIndexed
-
-                    val srcCanonical = runCatching { src.canonicalPath }.getOrDefault(src.absolutePath)
-                    val srcParentCanonical = runCatching { src.parentFile?.canonicalPath }.getOrNull()
-
-                    if (src.isDirectory && (targetCanonical == srcCanonical || targetCanonical.startsWith(srcCanonical + File.separator))) {
-                        skippedCount++
-                        return@forEachIndexed
-                    }
-                    if (isMove && srcParentCanonical == targetCanonical) {
-                        skippedCount++
-                        return@forEachIndexed
-                    }
-
-                    val res = if (isMove) {
-                        FileOperations.moveFileOrDirectory(src, targetDir)
-                    } else {
-                        FileOperations.copyFileOrDirectory(src, targetDir)
-                    }
-                    if (res.isSuccess) {
-                        successCount++
-                        succeededPaths.add(item.path)
-                    }
-                }
-            }
-
-            _operationProgress.value = OperationProgress(isRunning = false)
-            val targetName = targetDir.name.ifEmpty { targetDir.absolutePath }
-            when {
-                successCount > 0 -> {
-                    clearSelection()
-                    val verb = if (isMove) "Đã di chuyển" else "Đã sao chép"
-                    val skipNote = if (skippedCount > 0) " (bỏ qua $skippedCount mục trùng/lồng)" else ""
-                    _statusMessage.value = "$verb $successCount/${items.size} mục vào $targetName$skipNote"
-                    loadDirectory(_currentDirectory.value)
-                    if (_isDualPaneMode.value) loadSecondaryDirectory(_secondaryDirectory.value)
-                    CrossWindowTransferBus.emit(
-                        CrossWindowTransferEvent(
-                            sourcePaths = succeededPaths,
-                            targetDirectoryPath = targetDir.absolutePath,
-                            isMove = isMove,
-                            targetWindowId = windowInstanceId
-                        )
-                    )
-                }
-                skippedCount > 0 -> {
-                    _statusMessage.value = "Không thể chuyển thư mục vào chính nó hoặc cùng thư mục hiện tại"
-                }
-                else -> {
-                    _statusMessage.value = "Không thể xử lý tệp (kiểm tra quyền truy cập)"
-                }
-            }
-        }
     }
 
     fun setClipboard(action: ClipboardAction) {
@@ -971,12 +865,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _operationProgress.value = OperationProgress(
                 isRunning = true,
-                title = "Đang xóa ${items.size} mục...",
+                title = "Đang xóa tệp...",
                 totalFiles = items.size
             )
 
             var deletedCount = 0
-            val deletedPaths = mutableListOf<String>()
             withContext(Dispatchers.IO) {
                 items.forEachIndexed { index, item ->
                     _operationProgress.value = _operationProgress.value.copy(
@@ -985,10 +878,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         progress = if (items.isNotEmpty()) (index + 1).toFloat() / items.size.toFloat() else 1f
                     )
                     val res = FileOperations.deleteRecursively(File(item.path))
-                    if (res.isSuccess && res.getOrDefault(false)) {
-                        deletedCount++
-                        deletedPaths.add(item.path)
-                    }
+                    if (res.isSuccess && res.getOrDefault(false)) deletedCount++
                 }
             }
 
@@ -997,16 +887,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _statusMessage.value = "Đã xóa $deletedCount/${items.size} tệp/thư mục"
             loadDirectory(_currentDirectory.value)
             if (_isDualPaneMode.value) loadSecondaryDirectory(_secondaryDirectory.value)
-            if (deletedPaths.isNotEmpty()) {
-                CrossWindowTransferBus.emit(
-                    CrossWindowTransferEvent(
-                        sourcePaths = deletedPaths,
-                        targetDirectoryPath = _currentDirectory.value.absolutePath,
-                        isMove = true,
-                        targetWindowId = "batch_delete"
-                    )
-                )
-            }
         }
     }
 

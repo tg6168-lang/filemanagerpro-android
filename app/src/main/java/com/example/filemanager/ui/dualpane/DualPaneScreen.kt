@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.filemanager.apk.ApkInstaller
 import com.example.filemanager.archive.ArchiveManager
 import com.example.filemanager.archive.ArchivePasswordRequiredException
 import com.example.filemanager.model.FileItem
@@ -1035,11 +1036,11 @@ private fun SinglePaneView(
         ) {
             if (item.extension.equals("apk", ignoreCase = true) || item.fileType == FileType.APK) {
                 DropdownMenuItem(
-                    text = { Text("Phân tích APK (Inspector)", color = ElectricBlue, fontWeight = FontWeight.Bold) },
-                    leadingIcon = { Icon(Icons.Default.Search, null, tint = ElectricBlue) },
+                    text = { Text("Cài đặt APK ngay", color = ColorSuccessGreen, fontWeight = FontWeight.Bold) },
+                    leadingIcon = { Icon(Icons.Default.Download, null, tint = ColorSuccessGreen) },
                     onClick = {
                         itemMenuTarget = null
-                        onOpenFile(item)
+                        ApkInstaller.installApk(context, item.file)
                     }
                 )
             }

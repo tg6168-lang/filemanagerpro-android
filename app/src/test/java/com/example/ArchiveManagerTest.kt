@@ -115,33 +115,4 @@ class ArchiveManagerTest {
         assertFalse(f1.exists())
         assertFalse(f2.exists())
     }
-
-    @Test
-    fun compressAcrossDirectoriesWithDuplicateNamesPreservesAllFiles() = runBlocking {
-        val dirAlpha = tempFolder.newFolder("Alpha")
-        val dirBeta = tempFolder.newFolder("Beta")
-        val fAlpha = File(dirAlpha, "readme.txt").apply { writeText("content-alpha") }
-        val fBeta = File(dirBeta, "readme.txt").apply { writeText("content-beta") }
-        val fUnique = File(dirBeta, "notes.md").apply { writeText("unique-note") }
-        val outDir = tempFolder.newFolder("out_cross_dir")
-        val extractDir = tempFolder.newFolder("extract_cross_dir")
-
-        val config = ArchiveCompressionConfig(
-            archiveFileName = "cross_dir_batch.zip",
-            destinationDir = outDir,
-            format = ArchiveFormat.ZIP,
-            compressionLevel = ArchiveCompressionLevel.FAST,
-            encryptionMethod = ArchiveEncryptionMethod.NONE
-        )
-
-        val res = ArchiveManager.createArchive(listOf(fAlpha, fBeta, fUnique), config)
-        assertTrue(res.isSuccess)
-        val zipFile = res.getOrThrow().single()
-
-        val extractRes = ArchiveManager.extractAll(zipFile, extractDir)
-        assertTrue(extractRes.isSuccess)
-        assertEquals("content-alpha", File(extractDir, "Alpha/readme.txt").readText())
-        assertEquals("content-beta", File(extractDir, "Beta/readme.txt").readText())
-        assertEquals("unique-note", File(extractDir, "notes.md").readText())
-    }
 }

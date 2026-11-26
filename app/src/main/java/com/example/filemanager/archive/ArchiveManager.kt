@@ -617,9 +617,24 @@ object ArchiveManager {
 
             if (config.createSeparateArchives && sourceFiles.size > 1) {
                 val totalCount = sourceFiles.size.toFloat()
+                val usedArchiveNames = mutableSetOf<String>()
                 sourceFiles.forEachIndexed { idx, singleSource ->
-                    val singleName = "${singleSource.nameWithoutExtension.ifEmpty { singleSource.name }}.${config.format.extension}"
-                    val destFile = File(config.destinationDir, singleName)
+                    val baseStem = singleSource.nameWithoutExtension.ifEmpty { singleSource.name }
+                    var candidateName = "$baseStem.${config.format.extension}"
+                    if (!usedArchiveNames.add(candidateName)) {
+                        val parentTag = singleSource.parentFile?.name?.takeIf { it.isNotBlank() }
+                        candidateName = if (parentTag != null) {
+                            "${parentTag}_$baseStem.${config.format.extension}"
+                        } else {
+                            candidateName
+                        }
+                        var suffix = 2
+                        while (!usedArchiveNames.add(candidateName)) {
+                            candidateName = "${baseStem}_$suffix.${config.format.extension}"
+                            suffix++
+                        }
+                    }
+                    val destFile = File(config.destinationDir, candidateName)
                     val produced = compressSingleBatch(listOf(singleSource), destFile, config) { p, currentName ->
                         val overall = (idx + p) / totalCount
                         onProgress?.invoke(overall.coerceIn(0f, 1f), currentName)
@@ -699,8 +714,9 @@ object ArchiveManager {
                 }
 
                 // Walk files cleanly to preserve exact relative paths and live progress
-                for (source in sources) {
-                    addRecursiveZip4j(zip, source, source.name, params) { name -> reportItem(name) }
+                val mappedSources = disambiguateSourceEntryNames(sources)
+                for ((source, rootEntryName) in mappedSources) {
+                    addRecursiveZip4j(zip, source, rootEntryName, params) { name -> reportItem(name) }
                 }
             }
 
@@ -713,8 +729,9 @@ object ArchiveManager {
                     }
                     szOut.setContentCompression(method)
                     val buffer = ByteArray(BUFFER_SIZE)
-                    for (source in sources) {
-                        addRecursive7z(szOut, source, source.name, buffer) { name -> reportItem(name) }
+                    val mappedSources = disambiguateSourceEntryNames(sources)
+                    for ((source, rootEntryName) in mappedSources) {
+                        addRecursive7z(szOut, source, rootEntryName, buffer) { name -> reportItem(name) }
                     }
                     szOut.finish()
                 }
@@ -777,8 +794,9 @@ object ArchiveManager {
                     tos.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX)
                     tos.setBigNumberMode(TarArchiveOutputStream.BIGNUMBER_POSIX)
                     val buffer = ByteArray(BUFFER_SIZE)
-                    for (source in sources) {
-                        addRecursiveTar(tos, source, source.name, buffer) { name -> reportItem(name) }
+                    val mappedSources = disambiguateSourceEntryNames(sources)
+                    for ((source, rootEntryName) in mappedSources) {
+                        addRecursiveTar(tos, source, rootEntryName, buffer) { name -> reportItem(name) }
                     }
                     tos.finish()
                 }
@@ -945,6 +963,35 @@ object ArchiveManager {
         )
         val res = createArchive(sourceFiles, config, onProgress)
         return res.map { it.firstOrNull() ?: destinationZip }
+    }
+
+    internal fun disambiguateSourceEntryNames(sources: List<File>): List<Pair<File, String>> {
+        val nameCounts = sources.groupingBy { it.name }.eachCount()
+        val used = mutableSetOf<String>()
+        return sources.map { source ->
+            val initial = if ((nameCounts[source.name] ?: 0) > 1) {
+                val parentName = source.parentFile?.name?.takeIf { it.isNotBlank() }
+                if (parentName != null) "$parentName/${source.name}" else source.name
+            } else {
+                source.name
+            }
+            var candidate = initial
+            if (!used.add(candidate)) {
+                val stem = initial.substringBeforeLast('.', initial)
+                val ext = initial.substringAfterLast('.', "")
+                var idx = 2
+                while (true) {
+                    candidate = if (ext.isNotEmpty() && !source.isDirectory && initial.contains('.')) {
+                        "${stem}_$idx.$ext"
+                    } else {
+                        "${initial}_$idx"
+                    }
+                    if (used.add(candidate)) break
+                    idx++
+                }
+            }
+            source to candidate
+        }
     }
 
     private fun countFilesIn(file: File): Int {

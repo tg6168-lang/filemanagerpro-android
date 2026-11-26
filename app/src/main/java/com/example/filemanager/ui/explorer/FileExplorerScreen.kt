@@ -38,6 +38,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.DriveFileMove
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -76,7 +77,6 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.MainActivity
 import com.example.SecondaryWindowActivity
-import com.example.filemanager.apk.ApkInstaller
 import com.example.filemanager.model.*
 import com.example.filemanager.ui.archive.CreateArchiveDialog
 import com.example.filemanager.ui.archive.FolderPickerDialog
@@ -169,6 +169,12 @@ fun FileExplorerScreen(
     var pendingCrossWindowDrop by remember { mutableStateOf<Pair<List<File>, File>?>(null) }
     var isFabExpanded by remember { mutableStateOf(false) }
 
+    // Cross-directory Selection Mode & Batch Operation dialogs
+    var showSelectionMenu by remember { mutableStateOf(false) }
+    var showBatchMoreMenu by remember { mutableStateOf(false) }
+    var showSelectedBasketDialog by remember { mutableStateOf(false) }
+    var batchFolderPickerIsMove by remember { mutableStateOf<Boolean?>(null) }
+
     val safLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
@@ -229,6 +235,18 @@ fun FileExplorerScreen(
     val displayedSecondaryItems = remember(secondaryFileItems, searchQuery) {
         if (searchQuery.isBlank()) secondaryFileItems
         else secondaryFileItems.filter { it.name.contains(searchQuery, ignoreCase = true) }
+    }
+
+    val activeDisplayedItems = remember(isDualPane, activePaneIndex, displayedItems, displayedSecondaryItems) {
+        if (isDualPane && activePaneIndex == 1) displayedSecondaryItems else displayedItems
+    }
+
+    val selectedDirCount = remember(selectedItems) {
+        selectedItems.mapNotNull { File(it.path).parent }.distinct().size
+    }
+
+    val selectedTotalBytes = remember(selectedItems) {
+        selectedItems.filter { !it.isDirectory }.sumOf { it.size }
     }
 
     ModalNavigationDrawer(
@@ -386,8 +404,11 @@ fun FileExplorerScreen(
                     windowInsets = WindowInsets.statusBars,
                     navigationIcon = {
                         if (isMultiSelect) {
-                            IconButton(onClick = { viewModel.clearSelection() }) {
-                                Icon(Icons.Default.Close, contentDescription = "Đóng", tint = TextPrimary)
+                            IconButton(
+                                onClick = { viewModel.clearSelection() },
+                                modifier = Modifier.testTag("exit_selection_mode_button")
+                            ) {
+                                Icon(Icons.Default.Close, contentDescription = "Thoát chế độ chọn", tint = TextPrimary)
                             }
                         } else {
                             IconButton(onClick = {
@@ -414,12 +435,34 @@ fun FileExplorerScreen(
                                 modifier = Modifier.fillMaxWidth()
                             )
                         } else if (isMultiSelect) {
-                            Text(
-                                text = "Đã chọn ${selectedItems.size} mục",
-                                color = TextPrimary,
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Column(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable(enabled = selectedItems.isNotEmpty()) {
+                                        showSelectedBasketDialog = true
+                                    }
+                                    .padding(vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = if (selectedItems.isEmpty()) "Chế độ chọn nhiều" else "Đã chọn ${selectedItems.size} mục",
+                                    color = TextPrimary,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = if (selectedItems.isEmpty()) {
+                                        "Chạm mục để chọn • giữ khi chuyển thư mục"
+                                    } else {
+                                        "$selectedDirCount thư mục • ${FileItem.formatBytes(selectedTotalBytes)} • Xem"
+                                    },
+                                    color = CyanAccent,
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         } else {
                             Column(
                                 modifier = Modifier.clickable {
@@ -448,34 +491,81 @@ fun FileExplorerScreen(
                     },
                     actions = {
                         if (isMultiSelect) {
-                            IconButton(onClick = { viewModel.setClipboard(ClipboardAction.COPY) }) {
-                                Icon(Icons.Default.ContentCopy, contentDescription = "Sao chép", tint = TextPrimary)
+                            IconButton(
+                                onClick = { viewModel.selectAll(activeDisplayedItems) },
+                                modifier = Modifier.testTag("select_all_button")
+                            ) {
+                                Icon(Icons.Default.SelectAll, contentDescription = "Chọn tất cả thư mục này", tint = CyanAccent)
                             }
-                            IconButton(onClick = { viewModel.setClipboard(ClipboardAction.CUT) }) {
-                                Icon(Icons.Default.ContentCut, contentDescription = "Cắt", tint = TextPrimary)
-                            }
-                            IconButton(onClick = { showDeleteConfirmDialog = true }) {
-                                Icon(Icons.Default.Delete, contentDescription = "Xóa", tint = ColorErrorRed)
-                            }
-                            IconButton(onClick = {
-                                val files = selectedItems.map { File(it.path) }
-                                if (files.isNotEmpty()) {
-                                    compressInitialName = if (files.size == 1) "${files.first().nameWithoutExtension.ifEmpty { files.first().name }}.zip" else "${currentDir.name.ifEmpty { "archive" }}.zip"
-                                    compressInitialDir = currentDir
-                                    compressTargetFiles = files
+                            Box {
+                                IconButton(
+                                    onClick = { showSelectionMenu = true },
+                                    modifier = Modifier.testTag("selection_more_menu")
+                                ) {
+                                    Icon(Icons.Default.MoreVert, contentDescription = "Tùy chọn chọn nhiều", tint = TextPrimary)
                                 }
-                            }) {
-                                Icon(Icons.Default.FolderZip, contentDescription = "Tạo tệp lưu trữ", tint = CyanAccent)
-                            }
-                            IconButton(onClick = {
-                                if (selectedItems.size == 1) {
-                                    val item = selectedItems.first()
-                                    FileUtils.shareFile(context, File(item.path))
+                                DropdownMenu(
+                                    expanded = showSelectionMenu,
+                                    onDismissRequest = { showSelectionMenu = false },
+                                    modifier = Modifier.background(CharcoalSurfaceVariant)
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("Chọn tất cả thư mục này", color = CyanAccent) },
+                                        leadingIcon = { Icon(Icons.Default.SelectAll, null, tint = CyanAccent) },
+                                        onClick = {
+                                            showSelectionMenu = false
+                                            viewModel.selectAll(activeDisplayedItems)
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Đảo ngược lựa chọn", color = ElectricBlue) },
+                                        leadingIcon = { Icon(Icons.Default.SwapHoriz, null, tint = ElectricBlue) },
+                                        onClick = {
+                                            showSelectionMenu = false
+                                            viewModel.invertSelectionInDirectory(activeDisplayedItems)
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Bỏ chọn thư mục này", color = TextPrimary) },
+                                        leadingIcon = { Icon(Icons.Default.RemoveCircleOutline, null, tint = TextSecondary) },
+                                        onClick = {
+                                            showSelectionMenu = false
+                                            viewModel.deselectCurrentDirectory(activeDisplayedItems)
+                                        }
+                                    )
+                                    if (selectedItems.isNotEmpty()) {
+                                        DropdownMenuItem(
+                                            text = { Text("Xem danh sách đã chọn (${selectedItems.size})", color = GoldAccent) },
+                                            leadingIcon = { Icon(Icons.Default.Checklist, null, tint = GoldAccent) },
+                                            onClick = {
+                                                showSelectionMenu = false
+                                                showSelectedBasketDialog = true
+                                            }
+                                        )
+                                    }
+                                    HorizontalDivider(color = DocumentsUIDivider)
+                                    DropdownMenuItem(
+                                        text = { Text("Thoát & bỏ chọn tất cả", color = ColorErrorRed) },
+                                        leadingIcon = { Icon(Icons.Default.Close, null, tint = ColorErrorRed) },
+                                        onClick = {
+                                            showSelectionMenu = false
+                                            viewModel.clearSelection()
+                                        }
+                                    )
                                 }
-                            }) {
-                                Icon(Icons.Default.Share, contentDescription = "Chia sẻ", tint = TextPrimary)
                             }
                         } else {
+                            // Selection Mode quick entry button
+                            IconButton(
+                                onClick = { viewModel.enterSelectionMode() },
+                                modifier = Modifier.testTag("enter_selection_mode_button")
+                            ) {
+                                Icon(
+                                    Icons.Default.Checklist,
+                                    contentDescription = "Chế độ chọn nhiều",
+                                    tint = CyanAccent
+                                )
+                            }
                             // Search toggle
                             IconButton(onClick = { isSearching = !isSearching }) {
                                 Icon(
@@ -509,6 +599,14 @@ fun FileExplorerScreen(
                                     onDismissRequest = { showMoreMenu = false },
                                     modifier = Modifier.background(CharcoalSurfaceVariant)
                                 ) {
+                                    DropdownMenuItem(
+                                        text = { Text("Chế độ chọn nhiều (Đa thư mục)", color = CyanAccent) },
+                                        leadingIcon = { Icon(Icons.Default.Checklist, null, tint = CyanAccent) },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            viewModel.enterSelectionMode()
+                                        }
+                                    )
                                     DropdownMenuItem(
                                         text = { Text("Mở cửa sổ mới (2 ứng dụng độc lập)", color = CyanAccent) },
                                         leadingIcon = { Icon(Icons.Default.Launch, null, tint = CyanAccent) },
@@ -590,7 +688,7 @@ fun FileExplorerScreen(
                                         leadingIcon = { Icon(Icons.Default.SelectAll, null, tint = TextPrimary) },
                                         onClick = {
                                             showMoreMenu = false
-                                            viewModel.selectAll()
+                                            viewModel.selectAll(activeDisplayedItems)
                                         }
                                     )
                                 }
@@ -599,6 +697,50 @@ fun FileExplorerScreen(
                     },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = DocumentsUIDarkBg)
                 )
+            },
+            bottomBar = {
+                AnimatedVisibility(
+                    visible = isMultiSelect,
+                    enter = slideInVertically { it } + fadeIn(),
+                    exit = slideOutVertically { it } + fadeOut()
+                ) {
+                    SelectionBatchActionBar(
+                        selectedCount = selectedItems.size,
+                        shareableFileCount = selectedItems.count { !it.isDirectory },
+                        isDualPane = isDualPane,
+                        otherPaneName = if (activePaneIndex == 1) currentDir.name.ifEmpty { "Khung 1" } else secondaryDir.name.ifEmpty { "Khung 2" },
+                        showMoreMenu = showBatchMoreMenu,
+                        onShowMoreMenuChange = { showBatchMoreMenu = it },
+                        onMoveToFolder = { batchFolderPickerIsMove = true },
+                        onCopyToFolder = { batchFolderPickerIsMove = false },
+                        onZipSelected = {
+                            val files = selectedItems.map { File(it.path) }
+                            if (files.isNotEmpty()) {
+                                compressInitialName = if (files.size == 1) {
+                                    "${files.first().nameWithoutExtension.ifEmpty { files.first().name }}.zip"
+                                } else {
+                                    "${currentDir.name.ifEmpty { "archive" }}.zip"
+                                }
+                                compressInitialDir = currentDir
+                                compressTargetFiles = files
+                            }
+                        },
+                        onDeleteSelected = { showDeleteConfirmDialog = true },
+                        onClipboardCopy = { viewModel.setClipboard(ClipboardAction.COPY) },
+                        onClipboardCut = { viewModel.setClipboard(ClipboardAction.CUT) },
+                        onTransferToOtherPane = { isMove ->
+                            val targetDir = if (activePaneIndex == 1) currentDir else secondaryDir
+                            viewModel.batchMoveOrCopySelected(targetDir, isMove, windowInstanceId)
+                        },
+                        onShareSelected = {
+                            val files = selectedItems.filter { !it.isDirectory }.map { File(it.path) }
+                            if (!FileUtils.shareFiles(context, files)) {
+                                Toast.makeText(context, "Chọn ít nhất 1 tệp để chia sẻ", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        onReviewBasket = { showSelectedBasketDialog = true }
+                    )
+                }
             },
             floatingActionButton = {
                 if (!isMultiSelect) {
@@ -749,10 +891,11 @@ fun FileExplorerScreen(
                     )
                 }
 
-                // Breadcrumb Path Bar (if in subfolder)
+                // Breadcrumb Path Bar (if in subfolder) — preserved selection across directory jumps
                 if (activeCategoryTitle == null) {
                     PathBreadcrumbsBar(
                         currentDir = currentDir,
+                        isSelectionMode = isMultiSelect,
                         onNavigateTo = { viewModel.enterDirectory(it) }
                     )
                 }
@@ -778,6 +921,7 @@ fun FileExplorerScreen(
                                         items = displayedItems,
                                         isLoading = isLoading,
                                         isGridView = isGridView,
+                                        isSelectionMode = isMultiSelect,
                                         selectedItems = selectedItems,
                                         clipboard = clipboard,
                                         onEnterDir = { viewModel.enterDirectory(it) },
@@ -843,6 +987,7 @@ fun FileExplorerScreen(
                                         items = displayedSecondaryItems,
                                         isLoading = secondaryLoading,
                                         isGridView = isGridView,
+                                        isSelectionMode = isMultiSelect,
                                         selectedItems = selectedItems,
                                         clipboard = clipboard,
                                         onEnterDir = { viewModel.enterSecondaryDirectory(it) },
@@ -908,6 +1053,7 @@ fun FileExplorerScreen(
                                         items = displayedItems,
                                         isLoading = isLoading,
                                         isGridView = isGridView,
+                                        isSelectionMode = isMultiSelect,
                                         selectedItems = selectedItems,
                                         clipboard = clipboard,
                                         onEnterDir = { viewModel.enterDirectory(it) },
@@ -973,6 +1119,7 @@ fun FileExplorerScreen(
                                         items = displayedSecondaryItems,
                                         isLoading = secondaryLoading,
                                         isGridView = isGridView,
+                                        isSelectionMode = isMultiSelect,
                                         selectedItems = selectedItems,
                                         clipboard = clipboard,
                                         onEnterDir = { viewModel.enterSecondaryDirectory(it) },
@@ -1030,6 +1177,7 @@ fun FileExplorerScreen(
                             items = displayedItems,
                             isLoading = isLoading,
                             isGridView = isGridView,
+                            isSelectionMode = isMultiSelect,
                             selectedItems = selectedItems,
                             clipboard = clipboard,
                             onEnterDir = { viewModel.enterDirectory(it) },
@@ -1398,10 +1546,26 @@ fun FileExplorerScreen(
 
     // 6. Delete Confirm Dialog
     if (showDeleteConfirmDialog) {
+        val previewNames = selectedItems.take(4).joinToString(", ") { it.name }
+        val extraCount = (selectedItems.size - 4).coerceAtLeast(0)
         AlertDialog(
             onDismissRequest = { showDeleteConfirmDialog = false },
-            title = { Text("Xác nhận xóa", color = ColorErrorRed) },
-            text = { Text("Bạn có chắc chắn muốn xóa ${selectedItems.size} mục đã chọn vĩnh viễn?", color = TextPrimary) },
+            title = { Text("Xác nhận xóa ${selectedItems.size} mục", color = ColorErrorRed) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "Bạn có chắc chắn muốn xóa vĩnh viễn ${selectedItems.size} mục từ $selectedDirCount thư mục?",
+                        color = TextPrimary
+                    )
+                    if (previewNames.isNotEmpty()) {
+                        Text(
+                            text = if (extraCount > 0) "$previewNames (+$extraCount mục khác)" else previewNames,
+                            color = TextSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+            },
             confirmButton = {
                 Button(
                     onClick = {
@@ -1668,6 +1832,148 @@ fun FileExplorerScreen(
             containerColor = CharcoalSurfaceVariant
         )
     }
+
+    // 10. Batch Move / Copy Destination Folder Picker Dialog (Across Directories)
+    batchFolderPickerIsMove?.let { isMoveAction ->
+        FolderPickerDialog(
+            title = if (isMoveAction) {
+                "Di chuyển ${selectedItems.size} mục đến..."
+            } else {
+                "Sao chép ${selectedItems.size} mục đến..."
+            },
+            initialDir = currentDir,
+            onDismiss = { batchFolderPickerIsMove = null },
+            onFolderSelected = { targetDir ->
+                batchFolderPickerIsMove = null
+                viewModel.batchMoveOrCopySelected(
+                    targetDir = targetDir,
+                    isMove = isMoveAction,
+                    windowInstanceId = windowInstanceId
+                )
+            }
+        )
+    }
+
+    // 11. Selected Items Basket Review Dialog (Across Directories)
+    if (showSelectedBasketDialog) {
+        val groupedByParent = remember(selectedItems) {
+            selectedItems.sortedBy { it.path }.groupBy { File(it.path).parent ?: "/" }
+        }
+        AlertDialog(
+            onDismissRequest = { showSelectedBasketDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Checklist, contentDescription = null, tint = CyanAccent)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Đã chọn ${selectedItems.size} mục ($selectedDirCount thư mục)",
+                        color = TextPrimary,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp
+                    )
+                }
+            },
+            text = {
+                if (selectedItems.isEmpty()) {
+                    Text(
+                        text = "Chưa có mục nào được chọn.",
+                        color = TextMuted,
+                        fontSize = 13.sp
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 340.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        groupedByParent.forEach { (parentPath, groupItems) ->
+                            item(key = "header_$parentPath") {
+                                Text(
+                                    text = parentPath,
+                                    color = CyanAccent,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            items(groupItems, key = { "basket_${it.path}" }) { item ->
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = CharcoalBackground,
+                                    border = BorderStroke(1.dp, CharcoalSurfaceHighlight),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(start = 10.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = if (item.isDirectory) Icons.Default.Folder else Icons.Default.Description,
+                                            contentDescription = null,
+                                            tint = if (item.isDirectory) GoldAccent else ElectricBlue,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = item.name,
+                                                color = TextPrimary,
+                                                fontSize = 13.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            if (!item.isDirectory) {
+                                                Text(
+                                                    text = item.formattedSize,
+                                                    color = TextMuted,
+                                                    fontSize = 11.sp
+                                                )
+                                            }
+                                        }
+                                        IconButton(
+                                            onClick = { viewModel.removeSelectedPath(item.path) },
+                                            modifier = Modifier.size(48.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Close,
+                                                contentDescription = "Bỏ chọn ${item.name}",
+                                                tint = TextMuted,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (selectedItems.isNotEmpty()) {
+                        TextButton(onClick = {
+                            viewModel.clearSelection()
+                            showSelectedBasketDialog = false
+                        }) {
+                            Text("Bỏ chọn tất cả", color = ColorErrorRed)
+                        }
+                    }
+                    Button(
+                        onClick = { showSelectedBasketDialog = false },
+                        colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue)
+                    ) {
+                        Text("Đóng")
+                    }
+                }
+            },
+            containerColor = CharcoalSurfaceVariant
+        )
+    }
 }
 
 /**
@@ -1807,6 +2113,7 @@ private fun SubheaderRow(
 @Composable
 private fun PathBreadcrumbsBar(
     currentDir: File,
+    isSelectionMode: Boolean = false,
     onNavigateTo: (File) -> Unit
 ) {
     val rootPath = android.os.Environment.getExternalStorageDirectory().absolutePath
@@ -1826,9 +2133,40 @@ private fun PathBreadcrumbsBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 2.dp),
+                .padding(horizontal = 12.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            if (isSelectionMode && segments.size > 1) {
+                val parentDir = segments[segments.size - 2]
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = CyanGlow.copy(alpha = 0.14f),
+                    border = BorderStroke(1.dp, CyanGlow.copy(alpha = 0.5f)),
+                    modifier = Modifier
+                        .padding(end = 8.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { onNavigateTo(parentDir) }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ArrowUpward,
+                            contentDescription = "Lên thư mục cha",
+                            tint = CyanAccent,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Lên 1 cấp",
+                            color = CyanAccent,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
             segments.forEachIndexed { index, seg ->
                 val name = if (index == 0) (android.os.Build.MODEL.ifEmpty { "Bộ nhớ trong" }) else seg.name
                 val isLast = index == segments.size - 1
@@ -1838,18 +2176,205 @@ private fun PathBreadcrumbsBar(
                     style = MaterialTheme.typography.labelSmall,
                     fontSize = 12.sp,
                     fontWeight = if (isLast) FontWeight.Bold else FontWeight.Normal,
-                    modifier = Modifier.clickable { onNavigateTo(seg) }
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .clickable { onNavigateTo(seg) }
+                        .padding(horizontal = 4.dp, vertical = 4.dp)
                 )
                 if (!isLast) {
                     Text(
-                        text = "  /  ",
+                        text = "/",
                         color = TextMuted,
                         style = MaterialTheme.typography.labelSmall,
-                        fontSize = 11.sp
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(horizontal = 2.dp)
                     )
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SelectionBatchActionBar(
+    selectedCount: Int,
+    shareableFileCount: Int,
+    isDualPane: Boolean,
+    otherPaneName: String,
+    showMoreMenu: Boolean,
+    onShowMoreMenuChange: (Boolean) -> Unit,
+    onMoveToFolder: () -> Unit,
+    onCopyToFolder: () -> Unit,
+    onZipSelected: () -> Unit,
+    onDeleteSelected: () -> Unit,
+    onClipboardCopy: () -> Unit,
+    onClipboardCut: () -> Unit,
+    onTransferToOtherPane: (Boolean) -> Unit,
+    onShareSelected: () -> Unit,
+    onReviewBasket: () -> Unit
+) {
+    val hasSelection = selectedCount > 0
+    Surface(
+        color = ObsidianDeep,
+        border = BorderStroke(1.dp, CyanGlow.copy(alpha = 0.35f)),
+        tonalElevation = 10.dp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .windowInsetsPadding(WindowInsets.navigationBars)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 6.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            BatchActionDockItem(
+                icon = Icons.AutoMirrored.Filled.DriveFileMove,
+                label = "Di chuyển",
+                accent = GoldAccent,
+                enabled = hasSelection,
+                testTag = "batch_move_button",
+                onClick = onMoveToFolder,
+                modifier = Modifier.weight(1f)
+            )
+            BatchActionDockItem(
+                icon = Icons.Default.ContentCopy,
+                label = "Sao chép",
+                accent = ElectricBlue,
+                enabled = hasSelection,
+                testTag = "batch_copy_button",
+                onClick = onCopyToFolder,
+                modifier = Modifier.weight(1f)
+            )
+            BatchActionDockItem(
+                icon = Icons.Default.FolderZip,
+                label = "Nén ZIP",
+                accent = CyanAccent,
+                enabled = hasSelection,
+                testTag = "batch_zip_button",
+                onClick = onZipSelected,
+                modifier = Modifier.weight(1f)
+            )
+            BatchActionDockItem(
+                icon = Icons.Default.Delete,
+                label = "Xóa",
+                accent = ColorErrorRed,
+                enabled = hasSelection,
+                testTag = "batch_delete_button",
+                onClick = onDeleteSelected,
+                modifier = Modifier.weight(1f)
+            )
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                BatchActionDockItem(
+                    icon = Icons.Default.MoreHoriz,
+                    label = "Thêm",
+                    accent = TextPrimary,
+                    enabled = hasSelection,
+                    testTag = "batch_more_button",
+                    onClick = { onShowMoreMenuChange(true) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                DropdownMenu(
+                    expanded = showMoreMenu,
+                    onDismissRequest = { onShowMoreMenuChange(false) },
+                    modifier = Modifier.background(CharcoalSurfaceVariant)
+                ) {
+                    if (isDualPane) {
+                        DropdownMenuItem(
+                            text = { Text("Di chuyển sang $otherPaneName", color = GoldAccent) },
+                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.DriveFileMove, null, tint = GoldAccent) },
+                            onClick = {
+                                onShowMoreMenuChange(false)
+                                onTransferToOtherPane(true)
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Sao chép sang $otherPaneName", color = CyanAccent) },
+                            leadingIcon = { Icon(Icons.Default.ContentCopy, null, tint = CyanAccent) },
+                            onClick = {
+                                onShowMoreMenuChange(false)
+                                onTransferToOtherPane(false)
+                            }
+                        )
+                        HorizontalDivider(color = DocumentsUIDivider)
+                    }
+                    DropdownMenuItem(
+                        text = { Text("Cắt vào khay nhớ tạm", color = GoldAccent) },
+                        leadingIcon = { Icon(Icons.Default.ContentCut, null, tint = GoldAccent) },
+                        onClick = {
+                            onShowMoreMenuChange(false)
+                            onClipboardCut()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Sao chép vào khay nhớ tạm", color = ElectricBlue) },
+                        leadingIcon = { Icon(Icons.Default.ContentCopy, null, tint = ElectricBlue) },
+                        onClick = {
+                            onShowMoreMenuChange(false)
+                            onClipboardCopy()
+                        }
+                    )
+                    if (shareableFileCount > 0) {
+                        DropdownMenuItem(
+                            text = { Text("Chia sẻ ($shareableFileCount tệp)", color = CyanAccent) },
+                            leadingIcon = { Icon(Icons.Default.Share, null, tint = CyanAccent) },
+                            onClick = {
+                                onShowMoreMenuChange(false)
+                                onShareSelected()
+                            }
+                        )
+                    }
+                    DropdownMenuItem(
+                        text = { Text("Xem tất cả đã chọn ($selectedCount)", color = TextPrimary) },
+                        leadingIcon = { Icon(Icons.Default.Checklist, null, tint = TextPrimary) },
+                        onClick = {
+                            onShowMoreMenuChange(false)
+                            onReviewBasket()
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BatchActionDockItem(
+    icon: ImageVector,
+    label: String,
+    accent: Color,
+    enabled: Boolean,
+    testTag: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val activeTint = if (enabled) accent else TextMuted.copy(alpha = 0.45f)
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+        modifier = modifier
+            .defaultMinSize(minWidth = 48.dp, minHeight = 52.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(vertical = 4.dp, horizontal = 2.dp)
+            .testTag(testTag)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = activeTint,
+            modifier = Modifier.size(21.dp)
+        )
+        Spacer(modifier = Modifier.height(3.dp))
+        Text(
+            text = label,
+            color = if (enabled) TextPrimary else TextMuted.copy(alpha = 0.45f),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
@@ -2011,6 +2536,7 @@ private fun PaneContent(
     items: List<FileItem>,
     isLoading: Boolean,
     isGridView: Boolean,
+    isSelectionMode: Boolean,
     selectedItems: Set<FileItem>,
     clipboard: ClipboardState?,
     onEnterDir: (File) -> Unit,
@@ -2130,11 +2656,12 @@ private fun PaneContent(
                     .clickable { onFocus() }
             ) {
                 items(items, key = { "${paneIndex}_${it.path}" }) { item ->
-                    val isSelected = selectedItems.contains(item)
+                    val isSelected = selectedItems.any { it.path == item.path }
                     val dragItems = if (isSelected && selectedList.isNotEmpty()) selectedList else listOf(item)
                     GridFileCard(
                         item = item,
                         isSelected = isSelected,
+                        isSelectionMode = isSelectionMode,
                         windowInstanceId = windowInstanceId,
                         dragItems = dragItems,
                         isFolderDropHovered = hoveredFolderPath == item.path,
@@ -2148,10 +2675,16 @@ private fun PaneContent(
                         },
                         onClick = {
                             onFocus()
-                            if (selectedItems.isNotEmpty()) onToggleSelect(item)
+                            if (isSelectionMode) onToggleSelect(item)
                             else if (item.isDirectory) onEnterDir(File(item.path))
                             else onOpenFile(item)
                         },
+                        onOpenFolderInSelection = if (isSelectionMode && item.isDirectory) {
+                            {
+                                onFocus()
+                                onEnterDir(File(item.path))
+                            }
+                        } else null,
                         onLongClick = {
                             onFocus()
                             onLongClick(item)
@@ -2168,11 +2701,12 @@ private fun PaneContent(
                     .clickable { onFocus() }
             ) {
                 items(items, key = { "${paneIndex}_${it.path}" }) { item ->
-                    val isSelected = selectedItems.contains(item)
+                    val isSelected = selectedItems.any { it.path == item.path }
                     val dragItems = if (isSelected && selectedList.isNotEmpty()) selectedList else listOf(item)
                     DocumentsUIListItem(
                         item = item,
                         isSelected = isSelected,
+                        isSelectionMode = isSelectionMode,
                         windowInstanceId = windowInstanceId,
                         dragItems = dragItems,
                         isFolderDropHovered = hoveredFolderPath == item.path,
@@ -2186,10 +2720,16 @@ private fun PaneContent(
                         },
                         onClick = {
                             onFocus()
-                            if (selectedItems.isNotEmpty()) onToggleSelect(item)
+                            if (isSelectionMode) onToggleSelect(item)
                             else if (item.isDirectory) onEnterDir(File(item.path))
                             else onOpenFile(item)
                         },
+                        onOpenFolderInSelection = if (isSelectionMode && item.isDirectory) {
+                            {
+                                onFocus()
+                                onEnterDir(File(item.path))
+                            }
+                        } else null,
                         onLongClick = {
                             onFocus()
                             onLongClick(item)
@@ -2252,12 +2792,14 @@ private fun PaneContent(
 private fun DocumentsUIListItem(
     item: FileItem,
     isSelected: Boolean,
+    isSelectionMode: Boolean,
     windowInstanceId: String,
     dragItems: List<FileItem>,
     isFolderDropHovered: Boolean,
     onFolderHoverChanged: (Boolean) -> Unit,
     onCrossWindowDropOnFolder: (List<String>, File) -> Unit,
     onClick: () -> Unit,
+    onOpenFolderInSelection: (() -> Unit)?,
     onLongClick: () -> Unit,
     onTransferToOtherPane: ((Boolean) -> Unit)?,
     otherPaneDirName: String,
@@ -2395,6 +2937,17 @@ private fun DocumentsUIListItem(
                 .padding(start = 10.dp, end = 4.dp, top = 7.dp, bottom = 7.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            if (isSelectionMode) {
+                Icon(
+                    imageVector = if (isSelected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                    contentDescription = if (isSelected) "Đã chọn ${item.name}" else "Chưa chọn ${item.name}",
+                    tint = if (isSelected) CyanGlow else TextMuted,
+                    modifier = Modifier
+                        .padding(end = 8.dp)
+                        .size(22.dp)
+                )
+            }
+
             // Left Icon (Dark Premium bordered badge for folders, or rich file thumbnail/badge)
             FileIcon(item = item, isSelected = isSelected, modifier = Modifier.size(38.dp))
 
@@ -2476,6 +3029,22 @@ private fun DocumentsUIListItem(
                 }
             }
 
+            if (onOpenFolderInSelection != null) {
+                IconButton(
+                    onClick = onOpenFolderInSelection,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .testTag("open_folder_in_selection")
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = "Mở thư mục ${item.name}",
+                        tint = GoldAccent,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+            }
+
             // Quick overflow menu for actions (transfer, open with, info, rename, delete)
             Box {
                 IconButton(
@@ -2516,16 +3085,6 @@ private fun DocumentsUIListItem(
                     }
 
                     if (!item.isDirectory) {
-                        if (item.extension.equals("apk", ignoreCase = true) || item.fileType == FileType.APK) {
-                            DropdownMenuItem(
-                                text = { Text("Cài đặt APK ngay", color = ColorSuccessGreen, fontWeight = FontWeight.Bold) },
-                                leadingIcon = { Icon(Icons.Default.Download, null, tint = ColorSuccessGreen) },
-                                onClick = {
-                                    showItemMenu = false
-                                    ApkInstaller.installApk(context, File(item.path))
-                                }
-                            )
-                        }
                         if (item.fileType == FileType.ARCHIVE || item.extension.lowercase(java.util.Locale.ROOT) in setOf("zip", "7z", "tar", "gz", "bz2", "xz", "tgz", "tbz2", "txz", "lz4", "zst", "zstd", "tar.gz", "tar.bz2", "tar.xz", "tar.lz4", "tar.zstd", "xapk", "apks", "apkm", "jar", "obb")) {
                             DropdownMenuItem(
                                 text = { Text("Giải nén tại đây", color = CyanAccent, fontWeight = FontWeight.Medium) },
@@ -2603,12 +3162,14 @@ private fun DocumentsUIListItem(
 private fun GridFileCard(
     item: FileItem,
     isSelected: Boolean,
+    isSelectionMode: Boolean,
     windowInstanceId: String,
     dragItems: List<FileItem>,
     isFolderDropHovered: Boolean,
     onFolderHoverChanged: (Boolean) -> Unit,
     onCrossWindowDropOnFolder: (List<String>, File) -> Unit,
     onClick: () -> Unit,
+    onOpenFolderInSelection: (() -> Unit)?,
     onLongClick: () -> Unit
 ) {
     val textMeasurer = rememberTextMeasurer()
@@ -2725,28 +3286,72 @@ private fun GridFileCard(
                 }
             )
     ) {
-        Column(
-            modifier = Modifier.padding(10.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            FileIcon(item = item, isSelected = isSelected, modifier = Modifier.size(42.dp))
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = item.name,
-                color = TextPrimary,
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                fontSize = 12.sp,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center
-            )
-            if (!item.isDirectory) {
-                Spacer(modifier = Modifier.height(2.dp))
+        Box(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                FileIcon(item = item, isSelected = isSelected, modifier = Modifier.size(42.dp))
+                Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = item.formattedSize,
-                    color = TextMuted,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontSize = 10.sp
+                    text = item.name,
+                    color = TextPrimary,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    fontSize = 12.sp,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+                if (!item.isDirectory) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = item.formattedSize,
+                        color = TextMuted,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 10.sp
+                    )
+                } else if (onOpenFolderInSelection != null) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = GoldAccent.copy(alpha = 0.16f),
+                        border = BorderStroke(0.8.dp, GoldAccent.copy(alpha = 0.5f)),
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 26.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable(onClick = onOpenFolderInSelection)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Mở",
+                                color = GoldAccent,
+                                fontSize = 10.5.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = "Mở thư mục ${item.name}",
+                                tint = GoldAccent,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
+                }
+            }
+            if (isSelectionMode) {
+                Icon(
+                    imageVector = if (isSelected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                    contentDescription = if (isSelected) "Đã chọn ${item.name}" else "Chưa chọn ${item.name}",
+                    tint = if (isSelected) CyanGlow else TextMuted,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp)
+                        .size(20.dp)
                 )
             }
         }

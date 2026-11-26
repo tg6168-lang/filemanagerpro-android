@@ -168,6 +168,34 @@ object FileUtils {
         }
     }
 
+    fun shareFiles(context: Context, files: List<File>): Boolean {
+        val shareable = files.filter { it.exists() && it.isFile }
+        if (shareable.isEmpty()) return false
+        if (shareable.size == 1) return shareFile(context, shareable.first())
+        return try {
+            val uris = ArrayList<Uri>(shareable.size)
+            for (file in shareable) {
+                uris.add(
+                    FileProvider.getUriForFile(
+                        context,
+                        "${context.packageName}.fileprovider",
+                        file
+                    )
+                )
+            }
+            val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                type = "*/*"
+                putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(Intent.createChooser(intent, "Chia sẻ ${shareable.size} tệp"))
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     /**
      * Reads up to the first [maxBytes] of a file to check file header magic numbers
      */

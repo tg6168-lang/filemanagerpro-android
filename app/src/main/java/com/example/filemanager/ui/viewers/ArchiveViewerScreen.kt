@@ -41,6 +41,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.filemanager.apk.ApkInstaller
 import com.example.filemanager.archive.*
 import com.example.filemanager.model.FileItem
 import com.example.filemanager.ui.archive.FolderPickerDialog
@@ -371,7 +372,18 @@ fun ArchiveViewerScreen(
                             }
                             if (apksInZip.isNotEmpty()) {
                                 IconButton(onClick = {
-                                    showApksInZipDialog = true
+                                    if (apksInZip.size == 1) {
+                                        val singleApk = apksInZip.first()
+                                        coroutineScope.launch {
+                                            snackbarHostState.showSnackbar("Đang giải nén và chuẩn bị cài đặt ${singleApk.name}...")
+                                            val res = ApkInstaller.extractAndInstallFromZip(context, activeArchiveFile, singleApk.path)
+                                            if (res.isFailure) {
+                                                snackbarHostState.showSnackbar("Lỗi: ${res.exceptionOrNull()?.message}")
+                                            }
+                                        }
+                                    } else {
+                                        showApksInZipDialog = true
+                                    }
                                 }) {
                                     BadgedBox(
                                         badge = {
@@ -380,7 +392,7 @@ fun ArchiveViewerScreen(
                                             }
                                         }
                                     ) {
-                                        Icon(Icons.Default.Android, contentDescription = "Danh sách APK trong ZIP", tint = ColorSuccessGreen)
+                                        Icon(Icons.Default.Android, contentDescription = "Cài đặt APK trong ZIP", tint = ColorSuccessGreen)
                                     }
                                 }
                             }
@@ -1152,7 +1164,7 @@ fun ArchiveViewerScreen(
             text = {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Text(
-                        text = "Tệp này là gói ứng dụng Android APK nằm trong file nén. Bạn có thể kiểm tra chữ ký/quyền hạn bằng APK Inspector hoặc duyệt cấu trúc bên trong.",
+                        text = "Tệp này là ứng dụng Android APK nằm trong file nén. Bạn có thể cài đặt trực tiếp, kiểm tra phân tích mã nguồn hoặc duyệt các tệp bên trong.",
                         color = TextSecondary,
                         fontSize = 12.5.sp,
                         lineHeight = 17.sp
@@ -1160,6 +1172,29 @@ fun ArchiveViewerScreen(
                     Spacer(modifier = Modifier.height(14.dp))
 
                     Button(
+                        onClick = {
+                            val apkPath = node.fullPath
+                            apkNodeToInstall = null
+                            coroutineScope.launch {
+                                snackbarHostState.showSnackbar("Đang giải nén và khởi động trình cài đặt APK...")
+                                val res = ApkInstaller.extractAndInstallFromZip(context, activeArchiveFile, apkPath)
+                                if (res.isFailure) {
+                                    snackbarHostState.showSnackbar("Không thể cài APK: ${res.exceptionOrNull()?.message}")
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = ColorSuccessGreen),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Cài đặt APK này ngay", fontWeight = FontWeight.Bold)
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    OutlinedButton(
                         onClick = {
                             val apkPath = node.fullPath
                             apkNodeToInstall = null
@@ -1175,12 +1210,11 @@ fun ArchiveViewerScreen(
                             }
                         },
                         modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue),
                         shape = RoundedCornerShape(10.dp)
                     ) {
-                        Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp), tint = ElectricBlue)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Phân tích APK (Inspector)", fontWeight = FontWeight.Bold)
+                        Text("Phân tích APK (Inspector)", color = ElectricBlue)
                     }
 
                     Spacer(modifier = Modifier.height(8.dp))
@@ -1292,23 +1326,20 @@ fun ArchiveViewerScreen(
                                     onClick = {
                                         showApksInZipDialog = false
                                         coroutineScope.launch {
-                                            isPreviewLoading = true
-                                            val res = ArchiveManager.extractEntryToTemp(context.cacheDir, activeArchiveFile, apkInfo.path, archivePassword)
-                                            isPreviewLoading = false
-                                            if (res.isSuccess) {
-                                                onOpenApkInspector?.invoke(res.getOrThrow())
-                                            } else {
+                                            snackbarHostState.showSnackbar("Đang trích xuất và khởi động cài đặt ${apkInfo.name}...")
+                                            val res = ApkInstaller.extractAndInstallFromZip(context, activeArchiveFile, apkInfo.path)
+                                            if (res.isFailure) {
                                                 snackbarHostState.showSnackbar("Lỗi: ${res.exceptionOrNull()?.message}")
                                             }
                                         }
                                     },
-                                    colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue),
+                                    colors = ButtonDefaults.buttonColors(containerColor = ColorSuccessGreen),
                                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                                     shape = RoundedCornerShape(8.dp)
                                 ) {
-                                    Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Phân tích", fontSize = 12.sp)
+                                    Text("Cài đặt", fontSize = 12.sp)
                                 }
                             }
                         }

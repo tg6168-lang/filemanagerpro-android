@@ -77,6 +77,7 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.MainActivity
 import com.example.SecondaryWindowActivity
+import com.example.filemanager.apk.ApkInstaller
 import com.example.filemanager.model.*
 import com.example.filemanager.ui.archive.CreateArchiveDialog
 import com.example.filemanager.ui.archive.FolderPickerDialog
@@ -127,10 +128,9 @@ fun FileExplorerScreen(
     val secondaryLoading by viewModel.secondaryLoading.collectAsState()
     val activePaneIndex by viewModel.activePaneIndex.collectAsState()
 
-    // Selection & Clipboard
+    // Clipboard & View preferences
     val clipboard by viewModel.clipboard.collectAsState()
-    val selectedItems by viewModel.selectedItems.collectAsState()
-    val isMultiSelect by viewModel.isMultiSelectMode.collectAsState()
+    val showHiddenFiles by viewModel.showHiddenFiles.collectAsState()
     val isGridView by viewModel.isGridView.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     val operationProgress by viewModel.operationProgress.collectAsState()
@@ -150,7 +150,8 @@ fun FileExplorerScreen(
     var showRenameDialog by remember { mutableStateOf<FileItem?>(null) }
     var renameInput by remember { mutableStateOf("") }
 
-    var showDeleteConfirmDialog by remember { mutableStateOf(false) }
+    var deleteConfirmItem by remember { mutableStateOf<FileItem?>(null) }
+    var itemFolderPickerTarget by remember { mutableStateOf<Pair<FileItem, Boolean>?>(null) }
     var compressTargetFiles by remember { mutableStateOf<List<File>?>(null) }
     var compressInitialName by remember { mutableStateOf("archive.zip") }
     var compressInitialDir by remember { mutableStateOf(currentDir) }
@@ -169,18 +170,16 @@ fun FileExplorerScreen(
     var pendingCrossWindowDrop by remember { mutableStateOf<Pair<List<File>, File>?>(null) }
     var isFabExpanded by remember { mutableStateOf(false) }
 
-    // Cross-directory Selection Mode & Batch Operation dialogs
-    var showSelectionMenu by remember { mutableStateOf(false) }
-    var showBatchMoreMenu by remember { mutableStateOf(false) }
-    var showSelectedBasketDialog by remember { mutableStateOf(false) }
-    var batchFolderPickerIsMove by remember { mutableStateOf<Boolean?>(null) }
-
     val safLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
         if (uri != null) {
             viewModel.handleSafUri(uri)
         }
+    }
+
+    LaunchedEffect(Unit) {
+        viewModel.clearSelection()
     }
 
     LaunchedEffect(statusMessage) {
@@ -198,8 +197,6 @@ fun FileExplorerScreen(
         } else if (isSearching) {
             isSearching = false
             viewModel.setSearchQuery("")
-        } else if (isMultiSelect) {
-            viewModel.clearSelection()
         } else {
             val handled = viewModel.navigateBack()
             if (!handled) {
@@ -237,16 +234,9 @@ fun FileExplorerScreen(
         else secondaryFileItems.filter { it.name.contains(searchQuery, ignoreCase = true) }
     }
 
+    val activeDir = if (isDualPane && activePaneIndex == 1) secondaryDir else currentDir
     val activeDisplayedItems = remember(isDualPane, activePaneIndex, displayedItems, displayedSecondaryItems) {
         if (isDualPane && activePaneIndex == 1) displayedSecondaryItems else displayedItems
-    }
-
-    val selectedDirCount = remember(selectedItems) {
-        selectedItems.mapNotNull { File(it.path).parent }.distinct().size
-    }
-
-    val selectedTotalBytes = remember(selectedItems) {
-        selectedItems.filter { !it.isDirectory }.sumOf { it.size }
     }
 
     ModalNavigationDrawer(
@@ -403,19 +393,10 @@ fun FileExplorerScreen(
                 TopAppBar(
                     windowInsets = WindowInsets.statusBars,
                     navigationIcon = {
-                        if (isMultiSelect) {
-                            IconButton(
-                                onClick = { viewModel.clearSelection() },
-                                modifier = Modifier.testTag("exit_selection_mode_button")
-                            ) {
-                                Icon(Icons.Default.Close, contentDescription = "Thoát chế độ chọn", tint = TextPrimary)
-                            }
-                        } else {
-                            IconButton(onClick = {
-                                coroutineScope.launch { drawerState.open() }
-                            }) {
-                                Icon(Icons.Default.Menu, contentDescription = "Menu ngăn kéo", tint = TextPrimary)
-                            }
+                        IconButton(onClick = {
+                            coroutineScope.launch { drawerState.open() }
+                        }) {
+                            Icon(Icons.Default.Menu, contentDescription = "Menu ngăn kéo", tint = TextPrimary)
                         }
                     },
                     title = {
@@ -434,35 +415,6 @@ fun FileExplorerScreen(
                                 ),
                                 modifier = Modifier.fillMaxWidth()
                             )
-                        } else if (isMultiSelect) {
-                            Column(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable(enabled = selectedItems.isNotEmpty()) {
-                                        showSelectedBasketDialog = true
-                                    }
-                                    .padding(vertical = 2.dp)
-                            ) {
-                                Text(
-                                    text = if (selectedItems.isEmpty()) "Chế độ chọn nhiều" else "Đã chọn ${selectedItems.size} mục",
-                                    color = TextPrimary,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = if (selectedItems.isEmpty()) {
-                                        "Chạm mục để chọn • giữ khi chuyển thư mục"
-                                    } else {
-                                        "$selectedDirCount thư mục • ${FileItem.formatBytes(selectedTotalBytes)} • Xem"
-                                    },
-                                    color = CyanAccent,
-                                    fontSize = 11.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
                         } else {
                             Column(
                                 modifier = Modifier.clickable {
@@ -490,329 +442,226 @@ fun FileExplorerScreen(
                         }
                     },
                     actions = {
-                        if (isMultiSelect) {
+                        // Search toggle
+                        IconButton(onClick = { isSearching = !isSearching }) {
+                            Icon(
+                                if (isSearching) Icons.Default.Close else Icons.Default.Search,
+                                contentDescription = "Tìm kiếm",
+                                tint = TextPrimary
+                            )
+                        }
+                        // Direct View Mode toggle (Grid / List)
+                        IconButton(onClick = { viewModel.toggleViewMode() }) {
+                            Icon(
+                                if (isGridView) Icons.Default.ViewList else Icons.Default.GridView,
+                                contentDescription = if (isGridView) "Chuyển sang dạng Danh sách" else "Chuyển sang dạng Lưới",
+                                tint = TextPrimary
+                            )
+                        }
+                        // Direct Sort button
+                        IconButton(onClick = { showSortDialog = true }) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.Sort,
+                                contentDescription = "Sắp xếp",
+                                tint = TextPrimary
+                            )
+                        }
+                        Box {
                             IconButton(
-                                onClick = { viewModel.selectAll(activeDisplayedItems) },
-                                modifier = Modifier.testTag("select_all_button")
+                                onClick = { showMoreMenu = true },
+                                modifier = Modifier.testTag("topbar_more_menu")
                             ) {
-                                Icon(Icons.Default.SelectAll, contentDescription = "Chọn tất cả thư mục này", tint = CyanAccent)
+                                Icon(Icons.Default.MoreVert, contentDescription = "Tùy chọn khác", tint = TextPrimary)
                             }
-                            Box {
-                                IconButton(
-                                    onClick = { showSelectionMenu = true },
-                                    modifier = Modifier.testTag("selection_more_menu")
-                                ) {
-                                    Icon(Icons.Default.MoreVert, contentDescription = "Tùy chọn chọn nhiều", tint = TextPrimary)
-                                }
-                                DropdownMenu(
-                                    expanded = showSelectionMenu,
-                                    onDismissRequest = { showSelectionMenu = false },
-                                    modifier = Modifier.background(CharcoalSurfaceVariant)
-                                ) {
-                                    DropdownMenuItem(
-                                        text = { Text("Chọn tất cả thư mục này", color = CyanAccent) },
-                                        leadingIcon = { Icon(Icons.Default.SelectAll, null, tint = CyanAccent) },
-                                        onClick = {
-                                            showSelectionMenu = false
-                                            viewModel.selectAll(activeDisplayedItems)
-                                        }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Đảo ngược lựa chọn", color = ElectricBlue) },
-                                        leadingIcon = { Icon(Icons.Default.SwapHoriz, null, tint = ElectricBlue) },
-                                        onClick = {
-                                            showSelectionMenu = false
-                                            viewModel.invertSelectionInDirectory(activeDisplayedItems)
-                                        }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Bỏ chọn thư mục này", color = TextPrimary) },
-                                        leadingIcon = { Icon(Icons.Default.RemoveCircleOutline, null, tint = TextSecondary) },
-                                        onClick = {
-                                            showSelectionMenu = false
-                                            viewModel.deselectCurrentDirectory(activeDisplayedItems)
-                                        }
-                                    )
-                                    if (selectedItems.isNotEmpty()) {
-                                        DropdownMenuItem(
-                                            text = { Text("Xem danh sách đã chọn (${selectedItems.size})", color = GoldAccent) },
-                                            leadingIcon = { Icon(Icons.Default.Checklist, null, tint = GoldAccent) },
-                                            onClick = {
-                                                showSelectionMenu = false
-                                                showSelectedBasketDialog = true
-                                            }
-                                        )
-                                    }
-                                    HorizontalDivider(color = DocumentsUIDivider)
-                                    DropdownMenuItem(
-                                        text = { Text("Thoát & bỏ chọn tất cả", color = ColorErrorRed) },
-                                        leadingIcon = { Icon(Icons.Default.Close, null, tint = ColorErrorRed) },
-                                        onClick = {
-                                            showSelectionMenu = false
-                                            viewModel.clearSelection()
-                                        }
-                                    )
-                                }
-                            }
-                        } else {
-                            // Selection Mode quick entry button
-                            IconButton(
-                                onClick = { viewModel.enterSelectionMode() },
-                                modifier = Modifier.testTag("enter_selection_mode_button")
+                            DropdownMenu(
+                                expanded = showMoreMenu,
+                                onDismissRequest = { showMoreMenu = false },
+                                modifier = Modifier.background(CharcoalSurfaceVariant)
                             ) {
-                                Icon(
-                                    Icons.Default.Checklist,
-                                    contentDescription = "Chế độ chọn nhiều",
-                                    tint = CyanAccent
-                                )
-                            }
-                            // Search toggle
-                            IconButton(onClick = { isSearching = !isSearching }) {
-                                Icon(
-                                    if (isSearching) Icons.Default.Close else Icons.Default.Search,
-                                    contentDescription = "Tìm kiếm",
-                                    tint = TextPrimary
-                                )
-                            }
-                            // Direct View Mode toggle (Grid / List) in TopBar like ZArchiver
-                            IconButton(onClick = { viewModel.toggleViewMode() }) {
-                                Icon(
-                                    if (isGridView) Icons.Default.ViewList else Icons.Default.GridView,
-                                    contentDescription = if (isGridView) "Chuyển sang dạng Danh sách" else "Chuyển sang dạng Lưới",
-                                    tint = TextPrimary
-                                )
-                            }
-                            // Direct Sort button in TopBar like ZArchiver
-                            IconButton(onClick = { showSortDialog = true }) {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.Sort,
-                                    contentDescription = "Sắp xếp",
-                                    tint = TextPrimary
-                                )
-                            }
-                            Box {
-                                IconButton(onClick = { showMoreMenu = true }) {
-                                    Icon(Icons.Default.MoreVert, contentDescription = "Tùy chọn khác", tint = TextPrimary)
-                                }
-                                DropdownMenu(
-                                    expanded = showMoreMenu,
-                                    onDismissRequest = { showMoreMenu = false },
-                                    modifier = Modifier.background(CharcoalSurfaceVariant)
-                                ) {
+                                if (clipboard != null) {
+                                    val clip = clipboard!!
+                                    val actionLabel = if (clip.action == ClipboardAction.COPY) "Dán (Sao chép)" else "Dán (Di chuyển)"
                                     DropdownMenuItem(
-                                        text = { Text("Chế độ chọn nhiều (Đa thư mục)", color = CyanAccent) },
-                                        leadingIcon = { Icon(Icons.Default.Checklist, null, tint = CyanAccent) },
+                                        text = { Text("$actionLabel ${clip.items.size} mục vào đây", color = ElectricBlue, fontWeight = FontWeight.Bold) },
+                                        leadingIcon = { Icon(Icons.Default.ContentPaste, null, tint = ElectricBlue) },
                                         onClick = {
                                             showMoreMenu = false
-                                            viewModel.enterSelectionMode()
+                                            viewModel.pasteClipboard(activeDir)
                                         }
                                     )
                                     DropdownMenuItem(
-                                        text = { Text("Mở cửa sổ mới (2 ứng dụng độc lập)", color = CyanAccent) },
-                                        leadingIcon = { Icon(Icons.Default.Launch, null, tint = CyanAccent) },
+                                        text = { Text("Hủy khay nhớ tạm (${clip.items.size})", color = TextMuted) },
+                                        leadingIcon = { Icon(Icons.Default.ClearAll, null, tint = TextMuted) },
                                         onClick = {
                                             showMoreMenu = false
-                                            openNewAppWindow(context, currentDir.absolutePath)
+                                            viewModel.clearClipboard()
                                         }
                                     )
-                                    DropdownMenuItem(
-                                        text = { Text(if (isDualPane) "Tắt chia đôi màn hình" else "Chia đôi màn hình (Dual Pane)", color = ElectricBlue) },
-                                        leadingIcon = { Icon(Icons.Default.Splitscreen, null, tint = ElectricBlue) },
-                                        onClick = {
-                                            showMoreMenu = false
-                                            viewModel.toggleDualPane()
-                                        }
-                                    )
-                                    if (isDualPane) {
-                                        DropdownMenuItem(
-                                            text = { Text("Đổi chiều chia đôi (Dọc / Ngang)", color = TextPrimary) },
-                                            leadingIcon = { Icon(Icons.Default.ScreenRotation, null, tint = TextPrimary) },
-                                            onClick = {
-                                                showMoreMenu = false
-                                                viewModel.toggleDualPaneSplit()
-                                            }
-                                        )
-                                    }
                                     HorizontalDivider(color = DocumentsUIDivider)
-                                    DropdownMenuItem(
-                                        text = { Text("Tạo thư mục mới", color = TextPrimary) },
-                                        leadingIcon = { Icon(Icons.Default.CreateNewFolder, null, tint = Color(0xFFFFB300)) },
-                                        onClick = {
-                                            showMoreMenu = false
-                                            createInSecondaryPane = false
-                                            newFolderName = ""
-                                            showCreateFolderDialog = true
+                                }
+                                DropdownMenuItem(
+                                    text = { Text("Tạo thư mục mới", color = TextPrimary) },
+                                    leadingIcon = { Icon(Icons.Default.CreateNewFolder, null, tint = Color(0xFFFFB300)) },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        createInSecondaryPane = isDualPane && activePaneIndex == 1
+                                        newFolderName = ""
+                                        showCreateFolderDialog = true
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Tạo tệp mới", color = TextPrimary) },
+                                    leadingIcon = { Icon(Icons.Default.NoteAdd, null, tint = ElectricBlue) },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        createInSecondaryPane = isDualPane && activePaneIndex == 1
+                                        newFileName = ""
+                                        showCreateFileDialog = true
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Tạo tệp lưu trữ (Nén)...", color = CyanAccent) },
+                                    leadingIcon = { Icon(Icons.Default.FolderZip, null, tint = CyanAccent) },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        val files = activeDisplayedItems.map { File(it.path) }
+                                        if (files.isNotEmpty()) {
+                                            compressInitialName = if (files.size == 1) "${files.first().nameWithoutExtension.ifEmpty { files.first().name }}.zip" else "${activeDir.name.ifEmpty { "archive" }}.zip"
+                                            compressInitialDir = activeDir
+                                            compressTargetFiles = files
+                                        } else {
+                                            Toast.makeText(context, "Thư mục hiện tại trống", Toast.LENGTH_SHORT).show()
                                         }
-                                    )
+                                    }
+                                )
+                                HorizontalDivider(color = DocumentsUIDivider)
+                                DropdownMenuItem(
+                                    text = { Text("Mở cửa sổ mới (2 ứng dụng độc lập)", color = CyanAccent) },
+                                    leadingIcon = { Icon(Icons.Default.Launch, null, tint = CyanAccent) },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        openNewAppWindow(context, currentDir.absolutePath)
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(if (isDualPane) "Tắt chia đôi màn hình" else "Chia đôi màn hình (Dual Pane)", color = ElectricBlue) },
+                                    leadingIcon = { Icon(Icons.Default.Splitscreen, null, tint = ElectricBlue) },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        viewModel.toggleDualPane()
+                                    }
+                                )
+                                if (isDualPane) {
                                     DropdownMenuItem(
-                                        text = { Text("Tạo tệp mới", color = TextPrimary) },
-                                        leadingIcon = { Icon(Icons.Default.NoteAdd, null, tint = ElectricBlue) },
+                                        text = { Text("Đổi chiều chia đôi (Dọc / Ngang)", color = TextPrimary) },
+                                        leadingIcon = { Icon(Icons.Default.ScreenRotation, null, tint = TextPrimary) },
                                         onClick = {
                                             showMoreMenu = false
-                                            createInSecondaryPane = false
-                                            newFileName = ""
-                                            showCreateFileDialog = true
-                                        }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Tạo tệp lưu trữ (Nén)...", color = CyanAccent) },
-                                        leadingIcon = { Icon(Icons.Default.FolderZip, null, tint = CyanAccent) },
-                                        onClick = {
-                                            showMoreMenu = false
-                                            val files = selectedItems.map { File(it.path) }.ifEmpty { displayedItems.map { File(it.path) } }
-                                            if (files.isNotEmpty()) {
-                                                compressInitialName = if (files.size == 1) "${files.first().nameWithoutExtension.ifEmpty { files.first().name }}.zip" else "${currentDir.name.ifEmpty { "archive" }}.zip"
-                                                compressInitialDir = currentDir
-                                                compressTargetFiles = files
-                                            }
-                                        }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Hiện/Ẩn tệp ẩn", color = TextPrimary) },
-                                        leadingIcon = { Icon(Icons.Default.Visibility, null, tint = TextPrimary) },
-                                        onClick = {
-                                            showMoreMenu = false
-                                            viewModel.toggleShowHiddenFiles()
-                                        }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Kết nối & Chia sẻ Wi-Fi", color = ColorSuccessGreen) },
-                                        leadingIcon = { Icon(Icons.Default.Wifi, null, tint = ColorSuccessGreen) },
-                                        onClick = {
-                                            showMoreMenu = false
-                                            showConnectionsDialog = true
-                                        }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Chọn tất cả", color = TextPrimary) },
-                                        leadingIcon = { Icon(Icons.Default.SelectAll, null, tint = TextPrimary) },
-                                        onClick = {
-                                            showMoreMenu = false
-                                            viewModel.selectAll(activeDisplayedItems)
+                                            viewModel.toggleDualPaneSplit()
                                         }
                                     )
                                 }
+                                HorizontalDivider(color = DocumentsUIDivider)
+                                DropdownMenuItem(
+                                    text = { Text("Làm mới danh sách", color = TextPrimary) },
+                                    leadingIcon = { Icon(Icons.Default.Refresh, null, tint = CyanAccent) },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        viewModel.loadDirectory(currentDir)
+                                        if (isDualPane) viewModel.loadSecondaryDirectory(secondaryDir)
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(if (showHiddenFiles) "Ẩn tệp hệ thống (.)" else "Hiện tệp ẩn (.)", color = TextPrimary) },
+                                    leadingIcon = { Icon(if (showHiddenFiles) Icons.Default.VisibilityOff else Icons.Default.Visibility, null, tint = TextPrimary) },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        viewModel.toggleShowHiddenFiles()
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Kết nối & Chia sẻ Wi-Fi", color = ColorSuccessGreen) },
+                                    leadingIcon = { Icon(Icons.Default.Wifi, null, tint = ColorSuccessGreen) },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        showConnectionsDialog = true
+                                    }
+                                )
                             }
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = DocumentsUIDarkBg)
                 )
             },
-            bottomBar = {
-                AnimatedVisibility(
-                    visible = isMultiSelect,
-                    enter = slideInVertically { it } + fadeIn(),
-                    exit = slideOutVertically { it } + fadeOut()
-                ) {
-                    SelectionBatchActionBar(
-                        selectedCount = selectedItems.size,
-                        shareableFileCount = selectedItems.count { !it.isDirectory },
-                        isDualPane = isDualPane,
-                        otherPaneName = if (activePaneIndex == 1) currentDir.name.ifEmpty { "Khung 1" } else secondaryDir.name.ifEmpty { "Khung 2" },
-                        showMoreMenu = showBatchMoreMenu,
-                        onShowMoreMenuChange = { showBatchMoreMenu = it },
-                        onMoveToFolder = { batchFolderPickerIsMove = true },
-                        onCopyToFolder = { batchFolderPickerIsMove = false },
-                        onZipSelected = {
-                            val files = selectedItems.map { File(it.path) }
-                            if (files.isNotEmpty()) {
-                                compressInitialName = if (files.size == 1) {
-                                    "${files.first().nameWithoutExtension.ifEmpty { files.first().name }}.zip"
-                                } else {
-                                    "${currentDir.name.ifEmpty { "archive" }}.zip"
-                                }
-                                compressInitialDir = currentDir
-                                compressTargetFiles = files
-                            }
-                        },
-                        onDeleteSelected = { showDeleteConfirmDialog = true },
-                        onClipboardCopy = { viewModel.setClipboard(ClipboardAction.COPY) },
-                        onClipboardCut = { viewModel.setClipboard(ClipboardAction.CUT) },
-                        onTransferToOtherPane = { isMove ->
-                            val targetDir = if (activePaneIndex == 1) currentDir else secondaryDir
-                            viewModel.batchMoveOrCopySelected(targetDir, isMove, windowInstanceId)
-                        },
-                        onShareSelected = {
-                            val files = selectedItems.filter { !it.isDirectory }.map { File(it.path) }
-                            if (!FileUtils.shareFiles(context, files)) {
-                                Toast.makeText(context, "Chọn ít nhất 1 tệp để chia sẻ", Toast.LENGTH_SHORT).show()
-                            }
-                        },
-                        onReviewBasket = { showSelectedBasketDialog = true }
-                    )
-                }
-            },
             floatingActionButton = {
-                if (!isMultiSelect) {
-                    Column(
-                        horizontalAlignment = Alignment.End,
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                Column(
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    AnimatedVisibility(
+                        visible = isFabExpanded,
+                        enter = fadeIn() + expandVertically(),
+                        exit = fadeOut() + shrinkVertically()
                     ) {
-                        AnimatedVisibility(
-                            visible = isFabExpanded,
-                            enter = fadeIn() + expandVertically(),
-                            exit = fadeOut() + shrinkVertically()
+                        Column(
+                            horizontalAlignment = Alignment.End,
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Column(
-                                horizontalAlignment = Alignment.End,
-                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            SmallFloatingActionButton(
+                                onClick = {
+                                    isFabExpanded = false
+                                    createInSecondaryPane = isDualPane && activePaneIndex == 1
+                                    newFolderName = ""
+                                    showCreateFolderDialog = true
+                                },
+                                containerColor = Color(0xFFFFB300),
+                                contentColor = Color.Black
                             ) {
-                                SmallFloatingActionButton(
-                                    onClick = {
-                                        isFabExpanded = false
-                                        createInSecondaryPane = false
-                                        newFolderName = ""
-                                        showCreateFolderDialog = true
-                                    },
-                                    containerColor = Color(0xFFFFB300),
-                                    contentColor = Color.Black
-                                ) {
-                                    Icon(Icons.Default.CreateNewFolder, contentDescription = "Thư mục mới")
-                                }
+                                Icon(Icons.Default.CreateNewFolder, contentDescription = "Thư mục mới")
+                            }
 
-                                SmallFloatingActionButton(
-                                    onClick = {
-                                        isFabExpanded = false
-                                        createInSecondaryPane = false
-                                        newFileName = ""
-                                        showCreateFileDialog = true
-                                    },
-                                    containerColor = ElectricBlue,
-                                    contentColor = Color.White
-                                ) {
-                                    Icon(Icons.Default.NoteAdd, contentDescription = "Tệp mới")
-                                }
+                            SmallFloatingActionButton(
+                                onClick = {
+                                    isFabExpanded = false
+                                    createInSecondaryPane = isDualPane && activePaneIndex == 1
+                                    newFileName = ""
+                                    showCreateFileDialog = true
+                                },
+                                containerColor = ElectricBlue,
+                                contentColor = Color.White
+                            ) {
+                                Icon(Icons.Default.NoteAdd, contentDescription = "Tệp mới")
+                            }
 
-                                SmallFloatingActionButton(
-                                    onClick = {
-                                        isFabExpanded = false
-                                        val files = selectedItems.map { File(it.path) }.ifEmpty { displayedItems.map { File(it.path) } }
-                                        if (files.isNotEmpty()) {
-                                            compressInitialName = if (files.size == 1) "${files.first().nameWithoutExtension.ifEmpty { files.first().name }}.zip" else "${currentDir.name.ifEmpty { "archive" }}.zip"
-                                            compressInitialDir = currentDir
-                                            compressTargetFiles = files
-                                        }
-                                    },
-                                    containerColor = CyanAccent,
-                                    contentColor = Color.Black
-                                ) {
-                                    Icon(Icons.Default.FolderZip, contentDescription = "Tạo tệp lưu trữ")
-                                }
+                            SmallFloatingActionButton(
+                                onClick = {
+                                    isFabExpanded = false
+                                    val files = activeDisplayedItems.map { File(it.path) }
+                                    if (files.isNotEmpty()) {
+                                        compressInitialName = if (files.size == 1) "${files.first().nameWithoutExtension.ifEmpty { files.first().name }}.zip" else "${activeDir.name.ifEmpty { "archive" }}.zip"
+                                        compressInitialDir = activeDir
+                                        compressTargetFiles = files
+                                    }
+                                },
+                                containerColor = CyanAccent,
+                                contentColor = Color.Black
+                            ) {
+                                Icon(Icons.Default.FolderZip, contentDescription = "Tạo tệp lưu trữ")
                             }
                         }
+                    }
 
-                        FloatingActionButton(
-                            onClick = { isFabExpanded = !isFabExpanded },
-                            containerColor = if (isFabExpanded) CharcoalSurfaceHighlight else ElectricBlue,
-                            contentColor = Color.White,
-                            shape = CircleShape
-                        ) {
-                            Icon(
-                                if (isFabExpanded) Icons.Default.Close else Icons.Default.Add,
-                                contentDescription = "Thao tác tạo mới",
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
+                    FloatingActionButton(
+                        onClick = { isFabExpanded = !isFabExpanded },
+                        containerColor = if (isFabExpanded) CharcoalSurfaceHighlight else ElectricBlue,
+                        contentColor = Color.White,
+                        shape = CircleShape
+                    ) {
+                        Icon(
+                            if (isFabExpanded) Icons.Default.Close else Icons.Default.Add,
+                            contentDescription = "Thao tác tạo mới",
+                            modifier = Modifier.size(24.dp)
+                        )
                     }
                 }
             },
@@ -883,11 +732,10 @@ fun FileExplorerScreen(
                     }
                 }
 
-                // Breadcrumb Path Bar (if in subfolder) — preserved selection across directory jumps
+                // Breadcrumb Path Bar (if in subfolder)
                 if (activeCategoryTitle == null) {
                     PathBreadcrumbsBar(
                         currentDir = currentDir,
-                        isSelectionMode = isMultiSelect,
                         onNavigateTo = { viewModel.enterDirectory(it) }
                     )
                 }
@@ -913,18 +761,20 @@ fun FileExplorerScreen(
                                         items = displayedItems,
                                         isLoading = isLoading,
                                         isGridView = isGridView,
-                                        isSelectionMode = isMultiSelect,
-                                        selectedItems = selectedItems,
                                         clipboard = clipboard,
                                         onEnterDir = { viewModel.enterDirectory(it) },
                                         onOpenFile = { viewModel.openFile(it) },
-                                        onToggleSelect = { viewModel.toggleSelectItem(it) },
-                                        onLongClick = { viewModel.toggleSelectItem(it) },
                                         onFocus = { viewModel.setActivePane(0) },
                                         onTransferToOtherPane = { item, isMove ->
                                             viewModel.transferFileBetweenPanes(item, secondaryDir, isMove)
                                         },
                                         otherPaneDirName = secondaryDir.name.ifEmpty { "Cửa sổ 2" },
+                                        onCopyToClipboard = { item -> viewModel.setClipboardItems(ClipboardAction.COPY, listOf(item)) },
+                                        onCutToClipboard = { item -> viewModel.setClipboardItems(ClipboardAction.CUT, listOf(item)) },
+                                        onPasteClipboard = { targetDir -> viewModel.pasteClipboard(targetDir) },
+                                        onCopyToFolder = { item -> itemFolderPickerTarget = Pair(item, false) },
+                                        onMoveToFolder = { item -> itemFolderPickerTarget = Pair(item, true) },
+                                        onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
                                         onShowInfo = { item ->
                                             showInfoDialog = item
                                             isCalculatingInfoHash = false
@@ -934,7 +784,7 @@ fun FileExplorerScreen(
                                             showRenameDialog = item
                                             renameInput = item.name
                                         },
-                                        onDelete = { item -> viewModel.deleteSingleFile(item) },
+                                        onDelete = { item -> deleteConfirmItem = item },
                                         onCompress = { item ->
                                             val f = File(item.path)
                                             compressInitialName = "${f.nameWithoutExtension.ifEmpty { f.name }}.zip"
@@ -979,18 +829,20 @@ fun FileExplorerScreen(
                                         items = displayedSecondaryItems,
                                         isLoading = secondaryLoading,
                                         isGridView = isGridView,
-                                        isSelectionMode = isMultiSelect,
-                                        selectedItems = selectedItems,
                                         clipboard = clipboard,
                                         onEnterDir = { viewModel.enterSecondaryDirectory(it) },
                                         onOpenFile = { viewModel.openFile(it) },
-                                        onToggleSelect = { viewModel.toggleSelectItem(it) },
-                                        onLongClick = { viewModel.toggleSelectItem(it) },
                                         onFocus = { viewModel.setActivePane(1) },
                                         onTransferToOtherPane = { item, isMove ->
                                             viewModel.transferFileBetweenPanes(item, currentDir, isMove)
                                         },
                                         otherPaneDirName = currentDir.name.ifEmpty { "Cửa sổ 1" },
+                                        onCopyToClipboard = { item -> viewModel.setClipboardItems(ClipboardAction.COPY, listOf(item)) },
+                                        onCutToClipboard = { item -> viewModel.setClipboardItems(ClipboardAction.CUT, listOf(item)) },
+                                        onPasteClipboard = { targetDir -> viewModel.pasteClipboard(targetDir) },
+                                        onCopyToFolder = { item -> itemFolderPickerTarget = Pair(item, false) },
+                                        onMoveToFolder = { item -> itemFolderPickerTarget = Pair(item, true) },
+                                        onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
                                         onShowInfo = { item ->
                                             showInfoDialog = item
                                             isCalculatingInfoHash = false
@@ -1000,7 +852,7 @@ fun FileExplorerScreen(
                                             showRenameDialog = item
                                             renameInput = item.name
                                         },
-                                        onDelete = { item -> viewModel.deleteSingleFile(item) },
+                                        onDelete = { item -> deleteConfirmItem = item },
                                         onCompress = { item ->
                                             val f = File(item.path)
                                             compressInitialName = "${f.nameWithoutExtension.ifEmpty { f.name }}.zip"
@@ -1045,18 +897,20 @@ fun FileExplorerScreen(
                                         items = displayedItems,
                                         isLoading = isLoading,
                                         isGridView = isGridView,
-                                        isSelectionMode = isMultiSelect,
-                                        selectedItems = selectedItems,
                                         clipboard = clipboard,
                                         onEnterDir = { viewModel.enterDirectory(it) },
                                         onOpenFile = { viewModel.openFile(it) },
-                                        onToggleSelect = { viewModel.toggleSelectItem(it) },
-                                        onLongClick = { viewModel.toggleSelectItem(it) },
                                         onFocus = { viewModel.setActivePane(0) },
                                         onTransferToOtherPane = { item, isMove ->
                                             viewModel.transferFileBetweenPanes(item, secondaryDir, isMove)
                                         },
                                         otherPaneDirName = secondaryDir.name.ifEmpty { "Cửa sổ 2" },
+                                        onCopyToClipboard = { item -> viewModel.setClipboardItems(ClipboardAction.COPY, listOf(item)) },
+                                        onCutToClipboard = { item -> viewModel.setClipboardItems(ClipboardAction.CUT, listOf(item)) },
+                                        onPasteClipboard = { targetDir -> viewModel.pasteClipboard(targetDir) },
+                                        onCopyToFolder = { item -> itemFolderPickerTarget = Pair(item, false) },
+                                        onMoveToFolder = { item -> itemFolderPickerTarget = Pair(item, true) },
+                                        onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
                                         onShowInfo = { item ->
                                             showInfoDialog = item
                                             isCalculatingInfoHash = false
@@ -1066,7 +920,7 @@ fun FileExplorerScreen(
                                             showRenameDialog = item
                                             renameInput = item.name
                                         },
-                                        onDelete = { item -> viewModel.deleteSingleFile(item) },
+                                        onDelete = { item -> deleteConfirmItem = item },
                                         onCompress = { item ->
                                             val f = File(item.path)
                                             compressInitialName = "${f.nameWithoutExtension.ifEmpty { f.name }}.zip"
@@ -1111,18 +965,20 @@ fun FileExplorerScreen(
                                         items = displayedSecondaryItems,
                                         isLoading = secondaryLoading,
                                         isGridView = isGridView,
-                                        isSelectionMode = isMultiSelect,
-                                        selectedItems = selectedItems,
                                         clipboard = clipboard,
                                         onEnterDir = { viewModel.enterSecondaryDirectory(it) },
                                         onOpenFile = { viewModel.openFile(it) },
-                                        onToggleSelect = { viewModel.toggleSelectItem(it) },
-                                        onLongClick = { viewModel.toggleSelectItem(it) },
                                         onFocus = { viewModel.setActivePane(1) },
                                         onTransferToOtherPane = { item, isMove ->
                                             viewModel.transferFileBetweenPanes(item, currentDir, isMove)
                                         },
                                         otherPaneDirName = currentDir.name.ifEmpty { "Cửa sổ 1" },
+                                        onCopyToClipboard = { item -> viewModel.setClipboardItems(ClipboardAction.COPY, listOf(item)) },
+                                        onCutToClipboard = { item -> viewModel.setClipboardItems(ClipboardAction.CUT, listOf(item)) },
+                                        onPasteClipboard = { targetDir -> viewModel.pasteClipboard(targetDir) },
+                                        onCopyToFolder = { item -> itemFolderPickerTarget = Pair(item, false) },
+                                        onMoveToFolder = { item -> itemFolderPickerTarget = Pair(item, true) },
+                                        onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
                                         onShowInfo = { item ->
                                             showInfoDialog = item
                                             isCalculatingInfoHash = false
@@ -1132,7 +988,7 @@ fun FileExplorerScreen(
                                             showRenameDialog = item
                                             renameInput = item.name
                                         },
-                                        onDelete = { item -> viewModel.deleteSingleFile(item) },
+                                        onDelete = { item -> deleteConfirmItem = item },
                                         onCompress = { item ->
                                             val f = File(item.path)
                                             compressInitialName = "${f.nameWithoutExtension.ifEmpty { f.name }}.zip"
@@ -1169,16 +1025,18 @@ fun FileExplorerScreen(
                             items = displayedItems,
                             isLoading = isLoading,
                             isGridView = isGridView,
-                            isSelectionMode = isMultiSelect,
-                            selectedItems = selectedItems,
                             clipboard = clipboard,
                             onEnterDir = { viewModel.enterDirectory(it) },
                             onOpenFile = { viewModel.openFile(it) },
-                            onToggleSelect = { viewModel.toggleSelectItem(it) },
-                            onLongClick = { viewModel.toggleSelectItem(it) },
                             onFocus = { },
                             onTransferToOtherPane = { _, _ -> },
                             otherPaneDirName = "",
+                            onCopyToClipboard = { item -> viewModel.setClipboardItems(ClipboardAction.COPY, listOf(item)) },
+                            onCutToClipboard = { item -> viewModel.setClipboardItems(ClipboardAction.CUT, listOf(item)) },
+                            onPasteClipboard = { targetDir -> viewModel.pasteClipboard(targetDir) },
+                            onCopyToFolder = { item -> itemFolderPickerTarget = Pair(item, false) },
+                            onMoveToFolder = { item -> itemFolderPickerTarget = Pair(item, true) },
+                            onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
                             onShowInfo = { item ->
                                 showInfoDialog = item
                                 isCalculatingInfoHash = false
@@ -1188,7 +1046,7 @@ fun FileExplorerScreen(
                                 showRenameDialog = item
                                 renameInput = item.name
                             },
-                            onDelete = { item -> viewModel.deleteSingleFile(item) },
+                            onDelete = { item -> deleteConfirmItem = item },
                             onCompress = { item ->
                                 val f = File(item.path)
                                 compressInitialName = "${f.nameWithoutExtension.ifEmpty { f.name }}.zip"
@@ -1216,37 +1074,44 @@ fun FileExplorerScreen(
                         )
                     }
 
-                    // Floating Clipboard Bar (Paste / Cancel)
-                    if (clipboard != null && !isMultiSelect) {
+                    // Floating Clipboard Bar (Paste / Cancel) positioned cleanly away from bottom-right FAB
+                    if (clipboard != null) {
+                        val clip = clipboard!!
                         Surface(
                             shape = RoundedCornerShape(24.dp),
                             color = CharcoalSurfaceHighlight,
+                            border = BorderStroke(1.dp, ElectricBlue.copy(alpha = 0.5f)),
                             shadowElevation = 8.dp,
                             modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .padding(16.dp)
+                                .align(Alignment.BottomStart)
+                                .padding(start = 14.dp, end = 88.dp, bottom = 16.dp)
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = "${if (clipboard?.action == ClipboardAction.COPY) "Sao chép" else "Di chuyển"} (${clipboard?.items?.size} tệp)",
+                                    text = "${if (clip.action == ClipboardAction.COPY) "Sao chép" else "Cắt"} (${clip.items.size})",
                                     color = TextPrimary,
-                                    style = MaterialTheme.typography.bodyMedium
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Medium
                                 )
-                                Spacer(modifier = Modifier.width(12.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
                                 Button(
-                                    onClick = { viewModel.pasteClipboard() },
+                                    onClick = { viewModel.pasteClipboard(activeDir) },
                                     colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue),
-                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                    modifier = Modifier.heightIn(min = 38.dp)
                                 ) {
-                                    Icon(Icons.Default.ContentPaste, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Dán vào đây")
+                                    Icon(Icons.Default.ContentPaste, contentDescription = null, modifier = Modifier.size(15.dp))
+                                    Spacer(modifier = Modifier.width(5.dp))
+                                    Text("Dán vào đây", fontSize = 12.sp)
                                 }
-                                IconButton(onClick = { viewModel.clearClipboard() }) {
-                                    Icon(Icons.Default.Close, contentDescription = "Hủy", tint = TextMuted)
+                                IconButton(
+                                    onClick = { viewModel.clearClipboard() },
+                                    modifier = Modifier.size(40.dp)
+                                ) {
+                                    Icon(Icons.Default.Close, contentDescription = "Hủy", tint = TextMuted, modifier = Modifier.size(18.dp))
                                 }
                             }
                         }
@@ -1536,33 +1401,22 @@ fun FileExplorerScreen(
         )
     }
 
-    // 6. Delete Confirm Dialog
-    if (showDeleteConfirmDialog) {
-        val previewNames = selectedItems.take(4).joinToString(", ") { it.name }
-        val extraCount = (selectedItems.size - 4).coerceAtLeast(0)
+    // 6. Single-item Delete Confirm Dialog
+    deleteConfirmItem?.let { item ->
         AlertDialog(
-            onDismissRequest = { showDeleteConfirmDialog = false },
-            title = { Text("Xác nhận xóa ${selectedItems.size} mục", color = ColorErrorRed) },
+            onDismissRequest = { deleteConfirmItem = null },
+            title = { Text("Xác nhận xóa", color = ColorErrorRed) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(
-                        text = "Bạn có chắc chắn muốn xóa vĩnh viễn ${selectedItems.size} mục từ $selectedDirCount thư mục?",
-                        color = TextPrimary
-                    )
-                    if (previewNames.isNotEmpty()) {
-                        Text(
-                            text = if (extraCount > 0) "$previewNames (+$extraCount mục khác)" else previewNames,
-                            color = TextSecondary,
-                            fontSize = 12.sp
-                        )
-                    }
-                }
+                Text(
+                    text = "Bạn có chắc chắn muốn xóa vĩnh viễn \"${item.name}\"?",
+                    color = TextPrimary
+                )
             },
             confirmButton = {
                 Button(
                     onClick = {
-                        viewModel.deleteSelectedItems()
-                        showDeleteConfirmDialog = false
+                        viewModel.deleteSingleFile(item)
+                        deleteConfirmItem = null
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = ColorErrorRed)
                 ) {
@@ -1570,7 +1424,7 @@ fun FileExplorerScreen(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showDeleteConfirmDialog = false }) {
+                TextButton(onClick = { deleteConfirmItem = null }) {
                     Text("Hủy", color = TextMuted)
                 }
             },
@@ -1825,145 +1679,24 @@ fun FileExplorerScreen(
         )
     }
 
-    // 10. Batch Move / Copy Destination Folder Picker Dialog (Across Directories)
-    batchFolderPickerIsMove?.let { isMoveAction ->
+    // 10. Single-item Move / Copy Destination Folder Picker Dialog
+    itemFolderPickerTarget?.let { (item, isMoveAction) ->
         FolderPickerDialog(
             title = if (isMoveAction) {
-                "Di chuyển ${selectedItems.size} mục đến..."
+                "Di chuyển \"${item.name}\" đến..."
             } else {
-                "Sao chép ${selectedItems.size} mục đến..."
+                "Sao chép \"${item.name}\" đến..."
             },
-            initialDir = currentDir,
-            onDismiss = { batchFolderPickerIsMove = null },
+            initialDir = File(item.path).parentFile ?: currentDir,
+            onDismiss = { itemFolderPickerTarget = null },
             onFolderSelected = { targetDir ->
-                batchFolderPickerIsMove = null
-                viewModel.batchMoveOrCopySelected(
+                itemFolderPickerTarget = null
+                viewModel.moveOrCopySingleItem(
+                    item = item,
                     targetDir = targetDir,
-                    isMove = isMoveAction,
-                    windowInstanceId = windowInstanceId
+                    isMove = isMoveAction
                 )
             }
-        )
-    }
-
-    // 11. Selected Items Basket Review Dialog (Across Directories)
-    if (showSelectedBasketDialog) {
-        val groupedByParent = remember(selectedItems) {
-            selectedItems.sortedBy { it.path }.groupBy { File(it.path).parent ?: "/" }
-        }
-        AlertDialog(
-            onDismissRequest = { showSelectedBasketDialog = false },
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Checklist, contentDescription = null, tint = CyanAccent)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Đã chọn ${selectedItems.size} mục ($selectedDirCount thư mục)",
-                        color = TextPrimary,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp
-                    )
-                }
-            },
-            text = {
-                if (selectedItems.isEmpty()) {
-                    Text(
-                        text = "Chưa có mục nào được chọn.",
-                        color = TextMuted,
-                        fontSize = 13.sp
-                    )
-                } else {
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 340.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        groupedByParent.forEach { (parentPath, groupItems) ->
-                            item(key = "header_$parentPath") {
-                                Text(
-                                    text = parentPath,
-                                    color = CyanAccent,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                            items(groupItems, key = { "basket_${it.path}" }) { item ->
-                                Surface(
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = CharcoalBackground,
-                                    border = BorderStroke(1.dp, CharcoalSurfaceHighlight),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(start = 10.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Icon(
-                                            imageVector = if (item.isDirectory) Icons.Default.Folder else Icons.Default.Description,
-                                            contentDescription = null,
-                                            tint = if (item.isDirectory) GoldAccent else ElectricBlue,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                text = item.name,
-                                                color = TextPrimary,
-                                                fontSize = 13.sp,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            if (!item.isDirectory) {
-                                                Text(
-                                                    text = item.formattedSize,
-                                                    color = TextMuted,
-                                                    fontSize = 11.sp
-                                                )
-                                            }
-                                        }
-                                        IconButton(
-                                            onClick = { viewModel.removeSelectedPath(item.path) },
-                                            modifier = Modifier.size(48.dp)
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.Close,
-                                                contentDescription = "Bỏ chọn ${item.name}",
-                                                tint = TextMuted,
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (selectedItems.isNotEmpty()) {
-                        TextButton(onClick = {
-                            viewModel.clearSelection()
-                            showSelectedBasketDialog = false
-                        }) {
-                            Text("Bỏ chọn tất cả", color = ColorErrorRed)
-                        }
-                    }
-                    Button(
-                        onClick = { showSelectedBasketDialog = false },
-                        colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue)
-                    ) {
-                        Text("Đóng")
-                    }
-                }
-            },
-            containerColor = CharcoalSurfaceVariant
         )
     }
 }
@@ -2105,7 +1838,6 @@ private fun SubheaderRow(
 @Composable
 private fun PathBreadcrumbsBar(
     currentDir: File,
-    isSelectionMode: Boolean = false,
     onNavigateTo: (File) -> Unit
 ) {
     val rootPath = android.os.Environment.getExternalStorageDirectory().absolutePath
@@ -2128,37 +1860,6 @@ private fun PathBreadcrumbsBar(
                 .padding(horizontal = 12.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (isSelectionMode && segments.size > 1) {
-                val parentDir = segments[segments.size - 2]
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = CyanGlow.copy(alpha = 0.14f),
-                    border = BorderStroke(1.dp, CyanGlow.copy(alpha = 0.5f)),
-                    modifier = Modifier
-                        .padding(end = 8.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { onNavigateTo(parentDir) }
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.ArrowUpward,
-                            contentDescription = "Lên thư mục cha",
-                            tint = CyanAccent,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = "Lên 1 cấp",
-                            color = CyanAccent,
-                            fontSize = 11.5.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                }
-            }
             segments.forEachIndexed { index, seg ->
                 val name = if (index == 0) (android.os.Build.MODEL.ifEmpty { "Bộ nhớ trong" }) else seg.name
                 val isLast = index == segments.size - 1
@@ -2184,189 +1885,6 @@ private fun PathBreadcrumbsBar(
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun SelectionBatchActionBar(
-    selectedCount: Int,
-    shareableFileCount: Int,
-    isDualPane: Boolean,
-    otherPaneName: String,
-    showMoreMenu: Boolean,
-    onShowMoreMenuChange: (Boolean) -> Unit,
-    onMoveToFolder: () -> Unit,
-    onCopyToFolder: () -> Unit,
-    onZipSelected: () -> Unit,
-    onDeleteSelected: () -> Unit,
-    onClipboardCopy: () -> Unit,
-    onClipboardCut: () -> Unit,
-    onTransferToOtherPane: (Boolean) -> Unit,
-    onShareSelected: () -> Unit,
-    onReviewBasket: () -> Unit
-) {
-    val hasSelection = selectedCount > 0
-    Surface(
-        color = ObsidianDeep,
-        border = BorderStroke(1.dp, CyanGlow.copy(alpha = 0.35f)),
-        tonalElevation = 10.dp,
-        modifier = Modifier
-            .fillMaxWidth()
-            .windowInsetsPadding(WindowInsets.navigationBars)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 6.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            BatchActionDockItem(
-                icon = Icons.AutoMirrored.Filled.DriveFileMove,
-                label = "Di chuyển",
-                accent = GoldAccent,
-                enabled = hasSelection,
-                testTag = "batch_move_button",
-                onClick = onMoveToFolder,
-                modifier = Modifier.weight(1f)
-            )
-            BatchActionDockItem(
-                icon = Icons.Default.ContentCopy,
-                label = "Sao chép",
-                accent = ElectricBlue,
-                enabled = hasSelection,
-                testTag = "batch_copy_button",
-                onClick = onCopyToFolder,
-                modifier = Modifier.weight(1f)
-            )
-            BatchActionDockItem(
-                icon = Icons.Default.FolderZip,
-                label = "Nén ZIP",
-                accent = CyanAccent,
-                enabled = hasSelection,
-                testTag = "batch_zip_button",
-                onClick = onZipSelected,
-                modifier = Modifier.weight(1f)
-            )
-            BatchActionDockItem(
-                icon = Icons.Default.Delete,
-                label = "Xóa",
-                accent = ColorErrorRed,
-                enabled = hasSelection,
-                testTag = "batch_delete_button",
-                onClick = onDeleteSelected,
-                modifier = Modifier.weight(1f)
-            )
-            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                BatchActionDockItem(
-                    icon = Icons.Default.MoreHoriz,
-                    label = "Thêm",
-                    accent = TextPrimary,
-                    enabled = hasSelection,
-                    testTag = "batch_more_button",
-                    onClick = { onShowMoreMenuChange(true) },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                DropdownMenu(
-                    expanded = showMoreMenu,
-                    onDismissRequest = { onShowMoreMenuChange(false) },
-                    modifier = Modifier.background(CharcoalSurfaceVariant)
-                ) {
-                    if (isDualPane) {
-                        DropdownMenuItem(
-                            text = { Text("Di chuyển sang $otherPaneName", color = GoldAccent) },
-                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.DriveFileMove, null, tint = GoldAccent) },
-                            onClick = {
-                                onShowMoreMenuChange(false)
-                                onTransferToOtherPane(true)
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Sao chép sang $otherPaneName", color = CyanAccent) },
-                            leadingIcon = { Icon(Icons.Default.ContentCopy, null, tint = CyanAccent) },
-                            onClick = {
-                                onShowMoreMenuChange(false)
-                                onTransferToOtherPane(false)
-                            }
-                        )
-                        HorizontalDivider(color = DocumentsUIDivider)
-                    }
-                    DropdownMenuItem(
-                        text = { Text("Cắt vào khay nhớ tạm", color = GoldAccent) },
-                        leadingIcon = { Icon(Icons.Default.ContentCut, null, tint = GoldAccent) },
-                        onClick = {
-                            onShowMoreMenuChange(false)
-                            onClipboardCut()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Sao chép vào khay nhớ tạm", color = ElectricBlue) },
-                        leadingIcon = { Icon(Icons.Default.ContentCopy, null, tint = ElectricBlue) },
-                        onClick = {
-                            onShowMoreMenuChange(false)
-                            onClipboardCopy()
-                        }
-                    )
-                    if (shareableFileCount > 0) {
-                        DropdownMenuItem(
-                            text = { Text("Chia sẻ ($shareableFileCount tệp)", color = CyanAccent) },
-                            leadingIcon = { Icon(Icons.Default.Share, null, tint = CyanAccent) },
-                            onClick = {
-                                onShowMoreMenuChange(false)
-                                onShareSelected()
-                            }
-                        )
-                    }
-                    DropdownMenuItem(
-                        text = { Text("Xem tất cả đã chọn ($selectedCount)", color = TextPrimary) },
-                        leadingIcon = { Icon(Icons.Default.Checklist, null, tint = TextPrimary) },
-                        onClick = {
-                            onShowMoreMenuChange(false)
-                            onReviewBasket()
-                        }
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun BatchActionDockItem(
-    icon: ImageVector,
-    label: String,
-    accent: Color,
-    enabled: Boolean,
-    testTag: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val activeTint = if (enabled) accent else TextMuted.copy(alpha = 0.45f)
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-        modifier = modifier
-            .defaultMinSize(minWidth = 48.dp, minHeight = 52.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(vertical = 4.dp, horizontal = 2.dp)
-            .testTag(testTag)
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = label,
-            tint = activeTint,
-            modifier = Modifier.size(21.dp)
-        )
-        Spacer(modifier = Modifier.height(3.dp))
-        Text(
-            text = label,
-            color = if (enabled) TextPrimary else TextMuted.copy(alpha = 0.45f),
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Medium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
     }
 }
 
@@ -2419,16 +1937,18 @@ private fun PaneContent(
     items: List<FileItem>,
     isLoading: Boolean,
     isGridView: Boolean,
-    isSelectionMode: Boolean,
-    selectedItems: Set<FileItem>,
     clipboard: ClipboardState?,
     onEnterDir: (File) -> Unit,
     onOpenFile: (FileItem) -> Unit,
-    onToggleSelect: (FileItem) -> Unit,
-    onLongClick: (FileItem) -> Unit,
     onFocus: () -> Unit,
     onTransferToOtherPane: (FileItem, Boolean) -> Unit,
     otherPaneDirName: String,
+    onCopyToClipboard: (FileItem) -> Unit,
+    onCutToClipboard: (FileItem) -> Unit,
+    onPasteClipboard: (File) -> Unit,
+    onCopyToFolder: (FileItem) -> Unit,
+    onMoveToFolder: (FileItem) -> Unit,
+    onToggleFavorite: (FileItem) -> Unit,
     onShowInfo: (FileItem) -> Unit,
     onRename: (FileItem) -> Unit,
     onDelete: (FileItem) -> Unit,
@@ -2445,7 +1965,6 @@ private fun PaneContent(
     val currentDirState by rememberUpdatedState(dir)
     val hoveredFolderPathState by rememberUpdatedState(hoveredFolderPath)
     val currentOnCrossWindowDrop by rememberUpdatedState(onCrossWindowDrop)
-    val selectedList = remember(selectedItems) { selectedItems.toList() }
 
     val paneDropCallback = remember(windowInstanceId, dir.absolutePath) {
         object : DragAndDropTarget {
@@ -2530,23 +2049,20 @@ private fun PaneContent(
             }
         } else if (isGridView) {
             LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 100.dp),
-                contentPadding = PaddingValues(12.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                columns = GridCells.Adaptive(minSize = 104.dp),
+                contentPadding = PaddingValues(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier
                     .fillMaxSize()
                     .clickable { onFocus() }
             ) {
                 items(items, key = { "${paneIndex}_${it.path}" }) { item ->
-                    val isSelected = selectedItems.any { it.path == item.path }
-                    val dragItems = if (isSelected && selectedList.isNotEmpty()) selectedList else listOf(item)
                     GridFileCard(
                         item = item,
-                        isSelected = isSelected,
-                        isSelectionMode = isSelectionMode,
+                        currentDir = dir,
+                        clipboard = clipboard,
                         windowInstanceId = windowInstanceId,
-                        dragItems = dragItems,
                         isFolderDropHovered = hoveredFolderPath == item.path,
                         onFolderHoverChanged = { hovered ->
                             hoveredFolderPath = if (hovered) item.path else if (hoveredFolderPath == item.path) null else hoveredFolderPath
@@ -2558,20 +2074,27 @@ private fun PaneContent(
                         },
                         onClick = {
                             onFocus()
-                            if (isSelectionMode) onToggleSelect(item)
-                            else if (item.isDirectory) onEnterDir(File(item.path))
+                            if (item.isDirectory) onEnterDir(File(item.path))
                             else onOpenFile(item)
                         },
-                        onOpenFolderInSelection = if (isSelectionMode && item.isDirectory) {
-                            {
-                                onFocus()
-                                onEnterDir(File(item.path))
-                            }
+                        onOpenFileOrInspector = { onOpenFile(item) },
+                        onTransferToOtherPane = if (otherPaneDirName.isNotEmpty()) {
+                            { isMove -> onTransferToOtherPane(item, isMove) }
                         } else null,
-                        onLongClick = {
-                            onFocus()
-                            onLongClick(item)
-                        }
+                        otherPaneDirName = otherPaneDirName,
+                        onCopyToClipboard = { onCopyToClipboard(item) },
+                        onCutToClipboard = { onCutToClipboard(item) },
+                        onPasteClipboard = { targetDir -> onPasteClipboard(targetDir) },
+                        onCopyToFolder = { onCopyToFolder(item) },
+                        onMoveToFolder = { onMoveToFolder(item) },
+                        onToggleFavorite = { onToggleFavorite(item) },
+                        onOpenWith = { FileUtils.openWithExternalApp(context, File(item.path)) },
+                        onShowInfo = { onShowInfo(item) },
+                        onRename = { onRename(item) },
+                        onDelete = { onDelete(item) },
+                        onCompress = { onCompress(item) },
+                        onExtractHere = { onExtractHere(item) },
+                        onExtractToFolder = { onExtractToFolder(item) }
                     )
                 }
             }
@@ -2584,14 +2107,11 @@ private fun PaneContent(
                     .clickable { onFocus() }
             ) {
                 items(items, key = { "${paneIndex}_${it.path}" }) { item ->
-                    val isSelected = selectedItems.any { it.path == item.path }
-                    val dragItems = if (isSelected && selectedList.isNotEmpty()) selectedList else listOf(item)
                     DocumentsUIListItem(
                         item = item,
-                        isSelected = isSelected,
-                        isSelectionMode = isSelectionMode,
+                        currentDir = dir,
+                        clipboard = clipboard,
                         windowInstanceId = windowInstanceId,
-                        dragItems = dragItems,
                         isFolderDropHovered = hoveredFolderPath == item.path,
                         onFolderHoverChanged = { hovered ->
                             hoveredFolderPath = if (hovered) item.path else if (hoveredFolderPath == item.path) null else hoveredFolderPath
@@ -2603,24 +2123,20 @@ private fun PaneContent(
                         },
                         onClick = {
                             onFocus()
-                            if (isSelectionMode) onToggleSelect(item)
-                            else if (item.isDirectory) onEnterDir(File(item.path))
+                            if (item.isDirectory) onEnterDir(File(item.path))
                             else onOpenFile(item)
                         },
-                        onOpenFolderInSelection = if (isSelectionMode && item.isDirectory) {
-                            {
-                                onFocus()
-                                onEnterDir(File(item.path))
-                            }
-                        } else null,
-                        onLongClick = {
-                            onFocus()
-                            onLongClick(item)
-                        },
+                        onOpenFileOrInspector = { onOpenFile(item) },
                         onTransferToOtherPane = if (otherPaneDirName.isNotEmpty()) {
                             { isMove -> onTransferToOtherPane(item, isMove) }
                         } else null,
                         otherPaneDirName = otherPaneDirName,
+                        onCopyToClipboard = { onCopyToClipboard(item) },
+                        onCutToClipboard = { onCutToClipboard(item) },
+                        onPasteClipboard = { targetDir -> onPasteClipboard(targetDir) },
+                        onCopyToFolder = { onCopyToFolder(item) },
+                        onMoveToFolder = { onMoveToFolder(item) },
+                        onToggleFavorite = { onToggleFavorite(item) },
                         onOpenWith = { FileUtils.openWithExternalApp(context, File(item.path)) },
                         onShowInfo = { onShowInfo(item) },
                         onRename = { onRename(item) },
@@ -2667,25 +2183,266 @@ private fun PaneContent(
     }
 }
 
+@Composable
+private fun ItemActionsDropdownMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    item: FileItem,
+    currentDir: File,
+    clipboard: ClipboardState?,
+    otherPaneDirName: String,
+    onTransferToOtherPane: ((Boolean) -> Unit)?,
+    onOpenItem: () -> Unit,
+    onOpenFileOrInspector: () -> Unit,
+    onCopyToClipboard: () -> Unit,
+    onCutToClipboard: () -> Unit,
+    onPasteClipboard: (File) -> Unit,
+    onCopyToFolder: () -> Unit,
+    onMoveToFolder: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onOpenWith: () -> Unit,
+    onCompress: () -> Unit,
+    onExtractHere: () -> Unit,
+    onExtractToFolder: () -> Unit,
+    onRename: () -> Unit,
+    onShowInfo: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val context = LocalContext.current
+    val isApk = !item.isDirectory && (item.extension.equals("apk", ignoreCase = true) || item.fileType == FileType.APK)
+    val isArchive = !item.isDirectory && (
+        item.fileType == FileType.ARCHIVE ||
+            item.extension.lowercase(java.util.Locale.ROOT) in setOf(
+                "zip", "7z", "tar", "gz", "bz2", "xz", "tgz", "tbz2", "txz",
+                "lz4", "zst", "zstd", "tar.gz", "tar.bz2", "tar.xz", "tar.lz4", "tar.zstd",
+                "xapk", "apks", "apkm", "jar", "obb"
+            )
+        )
+
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismiss,
+        modifier = Modifier.background(CharcoalSurfaceVariant)
+    ) {
+        if (isApk) {
+            DropdownMenuItem(
+                text = { Text("Cài đặt APK ngay", color = ColorSuccessGreen, fontWeight = FontWeight.Bold) },
+                leadingIcon = { Icon(Icons.Default.Download, null, tint = ColorSuccessGreen) },
+                onClick = {
+                    onDismiss()
+                    ApkInstaller.installApk(context, File(item.path))
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("Phân tích APK (Inspector)", color = ElectricBlue) },
+                leadingIcon = { Icon(Icons.Default.Search, null, tint = ElectricBlue) },
+                onClick = {
+                    onDismiss()
+                    onOpenFileOrInspector()
+                }
+            )
+            HorizontalDivider(color = DocumentsUIDivider)
+        } else if (item.isDirectory) {
+            DropdownMenuItem(
+                text = { Text("Mở thư mục", color = TextPrimary, fontWeight = FontWeight.Medium) },
+                leadingIcon = { Icon(Icons.Default.FolderOpen, null, tint = GoldAccent) },
+                onClick = {
+                    onDismiss()
+                    onOpenItem()
+                }
+            )
+        } else {
+            DropdownMenuItem(
+                text = { Text("Mở bằng ứng dụng khác...", color = TextPrimary) },
+                leadingIcon = { Icon(Icons.Default.OpenInNew, null, tint = TextPrimary) },
+                onClick = {
+                    onDismiss()
+                    onOpenWith()
+                }
+            )
+        }
+
+        if (onTransferToOtherPane != null) {
+            DropdownMenuItem(
+                text = { Text("Sao chép sang $otherPaneDirName", color = CyanAccent) },
+                leadingIcon = { Icon(Icons.Default.ContentCopy, null, tint = CyanAccent) },
+                onClick = {
+                    onDismiss()
+                    onTransferToOtherPane(false)
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("Di chuyển sang $otherPaneDirName", color = ElectricBlue) },
+                leadingIcon = { Icon(Icons.AutoMirrored.Filled.ArrowForward, null, tint = ElectricBlue) },
+                onClick = {
+                    onDismiss()
+                    onTransferToOtherPane(true)
+                }
+            )
+            HorizontalDivider(color = DocumentsUIDivider)
+        }
+
+        DropdownMenuItem(
+            text = { Text("Sao chép (Copy)", color = CyanAccent, fontWeight = FontWeight.Medium) },
+            leadingIcon = { Icon(Icons.Default.ContentCopy, null, tint = CyanAccent) },
+            onClick = {
+                onDismiss()
+                onCopyToClipboard()
+            }
+        )
+        DropdownMenuItem(
+            text = { Text("Cắt (Di chuyển)", color = GoldAccent, fontWeight = FontWeight.Medium) },
+            leadingIcon = { Icon(Icons.Default.ContentCut, null, tint = GoldAccent) },
+            onClick = {
+                onDismiss()
+                onCutToClipboard()
+            }
+        )
+        if (clipboard != null) {
+            val pasteLabel = if (item.isDirectory) {
+                "Dán vào thư mục này (${clipboard.items.size})"
+            } else {
+                "Dán vào đây (${clipboard.items.size})"
+            }
+            val pasteTarget = if (item.isDirectory) File(item.path) else currentDir
+            DropdownMenuItem(
+                text = { Text(pasteLabel, color = ElectricBlue, fontWeight = FontWeight.Bold) },
+                leadingIcon = { Icon(Icons.Default.ContentPaste, null, tint = ElectricBlue) },
+                onClick = {
+                    onDismiss()
+                    onPasteClipboard(pasteTarget)
+                }
+            )
+        }
+        DropdownMenuItem(
+            text = { Text("Sao chép đến thư mục...", color = TextPrimary) },
+            leadingIcon = { Icon(Icons.Default.FileCopy, null, tint = ElectricBlue) },
+            onClick = {
+                onDismiss()
+                onCopyToFolder()
+            }
+        )
+        DropdownMenuItem(
+            text = { Text("Di chuyển đến thư mục...", color = TextPrimary) },
+            leadingIcon = { Icon(Icons.AutoMirrored.Filled.DriveFileMove, null, tint = GoldAccent) },
+            onClick = {
+                onDismiss()
+                onMoveToFolder()
+            }
+        )
+
+        HorizontalDivider(color = DocumentsUIDivider)
+
+        if (isArchive) {
+            DropdownMenuItem(
+                text = { Text("Giải nén tại đây", color = CyanAccent, fontWeight = FontWeight.Medium) },
+                leadingIcon = { Icon(Icons.Default.FolderOpen, null, tint = CyanAccent) },
+                onClick = {
+                    onDismiss()
+                    onExtractHere()
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("Giải nén đến thư mục khác...", color = ElectricBlue, fontWeight = FontWeight.Medium) },
+                leadingIcon = { Icon(Icons.AutoMirrored.Filled.DriveFileMove, null, tint = ElectricBlue) },
+                onClick = {
+                    onDismiss()
+                    onExtractToFolder()
+                }
+            )
+        }
+
+        DropdownMenuItem(
+            text = { Text("Nén thành tệp lưu trữ...", color = ColorWarningAmber) },
+            leadingIcon = { Icon(Icons.Default.FolderZip, null, tint = ColorWarningAmber) },
+            onClick = {
+                onDismiss()
+                onCompress()
+            }
+        )
+
+        if (!item.isDirectory) {
+            DropdownMenuItem(
+                text = { Text("Chia sẻ", color = TextPrimary) },
+                leadingIcon = { Icon(Icons.Default.Share, null, tint = CyanAccent) },
+                onClick = {
+                    onDismiss()
+                    if (!FileUtils.shareFile(context, File(item.path))) {
+                        Toast.makeText(context, "Không thể chia sẻ tệp này", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            )
+        }
+
+        DropdownMenuItem(
+            text = { Text("Đổi tên", color = TextPrimary) },
+            leadingIcon = { Icon(Icons.Default.Edit, null, tint = TextPrimary) },
+            onClick = {
+                onDismiss()
+                onRename()
+            }
+        )
+
+        DropdownMenuItem(
+            text = { Text(if (item.isFavorite) "Bỏ yêu thích" else "Thêm vào yêu thích", color = TextPrimary) },
+            leadingIcon = {
+                Icon(
+                    if (item.isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
+                    null,
+                    tint = GoldAccent
+                )
+            },
+            onClick = {
+                onDismiss()
+                onToggleFavorite()
+            }
+        )
+
+        DropdownMenuItem(
+            text = { Text("Chi tiết & Mã băm", color = TextPrimary) },
+            leadingIcon = { Icon(Icons.Default.Info, null, tint = TextPrimary) },
+            onClick = {
+                onDismiss()
+                onShowInfo()
+            }
+        )
+
+        HorizontalDivider(color = DocumentsUIDivider)
+
+        DropdownMenuItem(
+            text = { Text("Xóa", color = ColorErrorRed, fontWeight = FontWeight.Medium) },
+            leadingIcon = { Icon(Icons.Default.Delete, null, tint = ColorErrorRed) },
+            onClick = {
+                onDismiss()
+                onDelete()
+            }
+        )
+    }
+}
+
 /**
- * DocumentsUI Item Row: Folder / File icon + clean title + Drag & Drop source/folder target
+ * DocumentsUI Item Row: Folder / File icon + spacious title + full 3-dot overflow menu
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DocumentsUIListItem(
     item: FileItem,
-    isSelected: Boolean,
-    isSelectionMode: Boolean,
+    currentDir: File,
+    clipboard: ClipboardState?,
     windowInstanceId: String,
-    dragItems: List<FileItem>,
     isFolderDropHovered: Boolean,
     onFolderHoverChanged: (Boolean) -> Unit,
     onCrossWindowDropOnFolder: (List<String>, File) -> Unit,
     onClick: () -> Unit,
-    onOpenFolderInSelection: (() -> Unit)?,
-    onLongClick: () -> Unit,
+    onOpenFileOrInspector: () -> Unit,
     onTransferToOtherPane: ((Boolean) -> Unit)?,
     otherPaneDirName: String,
+    onCopyToClipboard: () -> Unit,
+    onCutToClipboard: () -> Unit,
+    onPasteClipboard: (File) -> Unit,
+    onCopyToFolder: () -> Unit,
+    onMoveToFolder: () -> Unit,
+    onToggleFavorite: () -> Unit,
     onOpenWith: () -> Unit,
     onShowInfo: () -> Unit,
     onRename: () -> Unit,
@@ -2694,13 +2451,8 @@ private fun DocumentsUIListItem(
     onExtractHere: () -> Unit,
     onExtractToFolder: () -> Unit
 ) {
-    val context = LocalContext.current
-    val textMeasurer = rememberTextMeasurer()
     var showItemMenu by remember { mutableStateOf(false) }
 
-    val dragLabel = if (dragItems.size > 1) "Kéo ${dragItems.size} mục" else item.name
-    val currentDragItems by rememberUpdatedState(dragItems)
-    val currentDragLabel by rememberUpdatedState(dragLabel)
     val currentOnFolderHoverChanged by rememberUpdatedState(onFolderHoverChanged)
     val currentOnCrossWindowDropOnFolder by rememberUpdatedState(onCrossWindowDropOnFolder)
 
@@ -2733,16 +2485,11 @@ private fun DocumentsUIListItem(
 
     Surface(
         shape = RoundedCornerShape(12.dp),
-        color = when {
-            isFolderDropHovered -> GoldAccent.copy(alpha = 0.2f)
-            isSelected -> CyanGlow.copy(alpha = 0.14f)
-            else -> CharcoalSurface
-        },
+        color = if (isFolderDropHovered) GoldAccent.copy(alpha = 0.2f) else CharcoalSurface,
         border = BorderStroke(
-            width = if (isFolderDropHovered || isSelected) 1.5.dp else 1.dp,
+            width = if (isFolderDropHovered) 1.5.dp else 1.dp,
             color = when {
                 isFolderDropHovered -> GoldAccent
-                isSelected -> CyanGlow.copy(alpha = 0.75f)
                 item.isDirectory -> GoldAccent.copy(alpha = 0.30f)
                 else -> CharcoalSurfaceHighlight
             }
@@ -2762,77 +2509,18 @@ private fun DocumentsUIListItem(
                     Modifier
                 }
             )
-            .then(
-                if (isSelected) {
-                    Modifier
-                        .dragAndDropSource(
-                            drawDragDecoration = {
-                                drawRoundRect(
-                                    color = Color(0xFF0A1224),
-                                    cornerRadius = CornerRadius(24f, 24f)
-                                )
-                                drawRoundRect(
-                                    color = CyanGlow,
-                                    cornerRadius = CornerRadius(24f, 24f),
-                                    style = Stroke(width = 4f)
-                                )
-                                val measured = textMeasurer.measure(
-                                    text = currentDragLabel,
-                                    style = TextStyle(color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold),
-                                    maxLines = 1
-                                )
-                                drawText(
-                                    textLayoutResult = measured,
-                                    topLeft = Offset(
-                                        x = ((size.width - measured.size.width) / 2f).coerceAtLeast(16f),
-                                        y = ((size.height - measured.size.height) / 2f).coerceAtLeast(8f)
-                                    )
-                                )
-                            }
-                        ) {
-                            detectDragGesturesAfterLongPress(
-                                onDragStart = {
-                                    val snapshot = currentDragItems
-                                    if (snapshot.isNotEmpty()) {
-                                        startTransfer(
-                                            DragAndDropTransferData(
-                                                clipData = CrossWindowTransferBus.buildClipData(windowInstanceId, snapshot),
-                                                flags = View.DRAG_FLAG_GLOBAL or View.DRAG_FLAG_GLOBAL_URI_READ
-                                            )
-                                        )
-                                    }
-                                },
-                                onDrag = { _, _ -> }
-                            )
-                        }
-                        .clickable(onClick = onClick)
-                } else {
-                    Modifier.combinedClickable(
-                        onClick = onClick,
-                        onLongClick = onLongClick
-                    )
-                }
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = { showItemMenu = true }
             )
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 10.dp, end = 4.dp, top = 7.dp, bottom = 7.dp),
+                .padding(start = 12.dp, end = 2.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (isSelectionMode) {
-                Icon(
-                    imageVector = if (isSelected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-                    contentDescription = if (isSelected) "Đã chọn ${item.name}" else "Chưa chọn ${item.name}",
-                    tint = if (isSelected) CyanGlow else TextMuted,
-                    modifier = Modifier
-                        .padding(end = 8.dp)
-                        .size(22.dp)
-                )
-            }
-
-            // Left Icon (Dark Premium bordered badge for folders, or rich file thumbnail/badge)
-            FileIcon(item = item, isSelected = isSelected, modifier = Modifier.size(38.dp))
+            FileIcon(item = item, isSelected = false, modifier = Modifier.size(38.dp))
 
             Spacer(modifier = Modifier.width(12.dp))
 
@@ -2865,200 +2553,83 @@ private fun DocumentsUIListItem(
                 }
             }
 
-            if (isSelected) {
-                Surface(
-                    shape = RoundedCornerShape(10.dp),
-                    color = CyanGlow.copy(alpha = 0.16f),
-                    border = BorderStroke(1.dp, CyanGlow.copy(alpha = 0.55f)),
-                    modifier = Modifier
-                        .size(48.dp)
-                        .testTag("drag_handle_item")
-                        .dragAndDropSource(
-                            drawDragDecoration = {
-                                val snapshotSize = currentDragItems.size
-                                drawCircle(color = Color(0xFF0A1224), radius = size.minDimension / 2f)
-                                drawCircle(color = CyanGlow, radius = size.minDimension / 2f - 2f, style = Stroke(width = 4f))
-                                val measured = textMeasurer.measure(
-                                    text = "$snapshotSize",
-                                    style = TextStyle(color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.ExtraBold)
-                                )
-                                drawText(
-                                    textLayoutResult = measured,
-                                    topLeft = Offset(
-                                        x = (size.width - measured.size.width) / 2f,
-                                        y = (size.height - measured.size.height) / 2f
-                                    )
-                                )
-                            }
-                        ) {
-                            detectPickUpOrDragGesture {
-                                val snapshot = currentDragItems
-                                if (snapshot.isEmpty()) null
-                                else DragAndDropTransferData(
-                                    clipData = CrossWindowTransferBus.buildClipData(windowInstanceId, snapshot),
-                                    flags = View.DRAG_FLAG_GLOBAL or View.DRAG_FLAG_GLOBAL_URI_READ
-                                )
-                            }
-                        }
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = Icons.Default.DragIndicator,
-                            contentDescription = "Kéo mục đã chọn",
-                            tint = CyanAccent,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                }
-            }
-
-            if (onOpenFolderInSelection != null) {
-                IconButton(
-                    onClick = onOpenFolderInSelection,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .testTag("open_folder_in_selection")
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        contentDescription = "Mở thư mục ${item.name}",
-                        tint = GoldAccent,
-                        modifier = Modifier.size(22.dp)
-                    )
-                }
-            }
-
-            // Quick overflow menu for actions (transfer, open with, info, rename, delete)
+            // Rightmost 3-dot overflow menu with full file operations
             Box {
                 IconButton(
                     onClick = { showItemMenu = true },
-                    modifier = Modifier.size(48.dp)
+                    modifier = Modifier
+                        .size(48.dp)
+                        .testTag("item_more_menu")
                 ) {
                     Icon(
                         Icons.Default.MoreVert,
-                        contentDescription = "Tùy chọn",
+                        contentDescription = "Tùy chọn ${item.name}",
                         tint = TextSecondary,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(20.dp)
                     )
                 }
 
-                DropdownMenu(
+                ItemActionsDropdownMenu(
                     expanded = showItemMenu,
-                    onDismissRequest = { showItemMenu = false },
-                    modifier = Modifier.background(CharcoalSurfaceVariant)
-                ) {
-                    if (onTransferToOtherPane != null) {
-                        DropdownMenuItem(
-                            text = { Text("Sao chép sang $otherPaneDirName", color = CyanAccent) },
-                            leadingIcon = { Icon(Icons.Default.ContentCopy, null, tint = CyanAccent) },
-                            onClick = {
-                                showItemMenu = false
-                                onTransferToOtherPane(false)
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Di chuyển sang $otherPaneDirName", color = ElectricBlue) },
-                            leadingIcon = { Icon(Icons.Default.ArrowForward, null, tint = ElectricBlue) },
-                            onClick = {
-                                showItemMenu = false
-                                onTransferToOtherPane(true)
-                            }
-                        )
-                        HorizontalDivider(color = DocumentsUIDivider)
-                    }
-
-                    if (!item.isDirectory) {
-                        if (item.fileType == FileType.ARCHIVE || item.extension.lowercase(java.util.Locale.ROOT) in setOf("zip", "7z", "tar", "gz", "bz2", "xz", "tgz", "tbz2", "txz", "lz4", "zst", "zstd", "tar.gz", "tar.bz2", "tar.xz", "tar.lz4", "tar.zstd", "xapk", "apks", "apkm", "jar", "obb")) {
-                            DropdownMenuItem(
-                                text = { Text("Giải nén tại đây", color = CyanAccent, fontWeight = FontWeight.Medium) },
-                                leadingIcon = { Icon(Icons.Default.FolderOpen, null, tint = CyanAccent) },
-                                onClick = {
-                                    showItemMenu = false
-                                    onExtractHere()
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Giải nén đến thư mục khác...", color = ElectricBlue, fontWeight = FontWeight.Medium) },
-                                leadingIcon = { Icon(Icons.AutoMirrored.Filled.DriveFileMove, null, tint = ElectricBlue) },
-                                onClick = {
-                                    showItemMenu = false
-                                    onExtractToFolder()
-                                }
-                            )
-                        }
-                        DropdownMenuItem(
-                            text = { Text("Mở bằng ứng dụng khác...", color = TextPrimary) },
-                            leadingIcon = { Icon(Icons.Default.OpenInNew, null, tint = TextPrimary) },
-                            onClick = {
-                                showItemMenu = false
-                                onOpenWith()
-                            }
-                        )
-                    }
-
-                    DropdownMenuItem(
-                        text = { Text("Nén thành tệp lưu trữ...", color = ColorWarningAmber) },
-                        leadingIcon = { Icon(Icons.Default.FolderZip, null, tint = ColorWarningAmber) },
-                        onClick = {
-                            showItemMenu = false
-                            onCompress()
-                        }
-                    )
-
-                    DropdownMenuItem(
-                        text = { Text("Đổi tên", color = TextPrimary) },
-                        leadingIcon = { Icon(Icons.Default.Edit, null, tint = TextPrimary) },
-                        onClick = {
-                            showItemMenu = false
-                            onRename()
-                        }
-                    )
-
-                    DropdownMenuItem(
-                        text = { Text("Chi tiết & Mã băm", color = TextPrimary) },
-                        leadingIcon = { Icon(Icons.Default.Info, null, tint = TextPrimary) },
-                        onClick = {
-                            showItemMenu = false
-                            onShowInfo()
-                        }
-                    )
-
-                    DropdownMenuItem(
-                        text = { Text("Xóa", color = ColorErrorRed) },
-                        leadingIcon = { Icon(Icons.Default.Delete, null, tint = ColorErrorRed) },
-                        onClick = {
-                            showItemMenu = false
-                            onDelete()
-                        }
-                    )
-                }
+                    onDismiss = { showItemMenu = false },
+                    item = item,
+                    currentDir = currentDir,
+                    clipboard = clipboard,
+                    otherPaneDirName = otherPaneDirName,
+                    onTransferToOtherPane = onTransferToOtherPane,
+                    onOpenItem = onClick,
+                    onOpenFileOrInspector = onOpenFileOrInspector,
+                    onCopyToClipboard = onCopyToClipboard,
+                    onCutToClipboard = onCutToClipboard,
+                    onPasteClipboard = onPasteClipboard,
+                    onCopyToFolder = onCopyToFolder,
+                    onMoveToFolder = onMoveToFolder,
+                    onToggleFavorite = onToggleFavorite,
+                    onOpenWith = onOpenWith,
+                    onCompress = onCompress,
+                    onExtractHere = onExtractHere,
+                    onExtractToFolder = onExtractToFolder,
+                    onRename = onRename,
+                    onShowInfo = onShowInfo,
+                    onDelete = onDelete
+                )
             }
         }
     }
 }
 
 /**
- * Grid Card View with Drag & Drop support
+ * Grid Card View with full 3-dot action menu and drop target support
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun GridFileCard(
     item: FileItem,
-    isSelected: Boolean,
-    isSelectionMode: Boolean,
+    currentDir: File,
+    clipboard: ClipboardState?,
     windowInstanceId: String,
-    dragItems: List<FileItem>,
     isFolderDropHovered: Boolean,
     onFolderHoverChanged: (Boolean) -> Unit,
     onCrossWindowDropOnFolder: (List<String>, File) -> Unit,
     onClick: () -> Unit,
-    onOpenFolderInSelection: (() -> Unit)?,
-    onLongClick: () -> Unit
+    onOpenFileOrInspector: () -> Unit,
+    onTransferToOtherPane: ((Boolean) -> Unit)?,
+    otherPaneDirName: String,
+    onCopyToClipboard: () -> Unit,
+    onCutToClipboard: () -> Unit,
+    onPasteClipboard: (File) -> Unit,
+    onCopyToFolder: () -> Unit,
+    onMoveToFolder: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onOpenWith: () -> Unit,
+    onShowInfo: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+    onCompress: () -> Unit,
+    onExtractHere: () -> Unit,
+    onExtractToFolder: () -> Unit
 ) {
-    val textMeasurer = rememberTextMeasurer()
-    val dragLabel = if (dragItems.size > 1) "Kéo ${dragItems.size} mục" else item.name
-    val currentDragItems by rememberUpdatedState(dragItems)
-    val currentDragLabel by rememberUpdatedState(dragLabel)
+    var showItemMenu by remember { mutableStateOf(false) }
     val currentOnFolderHoverChanged by rememberUpdatedState(onFolderHoverChanged)
     val currentOnCrossWindowDropOnFolder by rememberUpdatedState(onCrossWindowDropOnFolder)
 
@@ -3091,16 +2662,11 @@ private fun GridFileCard(
 
     Surface(
         shape = RoundedCornerShape(12.dp),
-        color = when {
-            isFolderDropHovered -> GoldAccent.copy(alpha = 0.22f)
-            isSelected -> CyanGlow.copy(alpha = 0.16f)
-            else -> CharcoalSurface
-        },
+        color = if (isFolderDropHovered) GoldAccent.copy(alpha = 0.22f) else CharcoalSurface,
         border = BorderStroke(
-            width = if (isFolderDropHovered || isSelected) 1.5.dp else 1.1.dp,
+            width = if (isFolderDropHovered) 1.5.dp else 1.1.dp,
             color = when {
                 isFolderDropHovered -> GoldAccent
-                isSelected -> CyanGlow.copy(alpha = 0.8f)
                 item.isDirectory -> GoldAccent.copy(alpha = 0.38f)
                 else -> CharcoalSurfaceHighlight
             }
@@ -3120,63 +2686,19 @@ private fun GridFileCard(
                     Modifier
                 }
             )
-            .then(
-                if (isSelected) {
-                    Modifier
-                        .dragAndDropSource(
-                            drawDragDecoration = {
-                                drawRoundRect(color = Color(0xFF0A1224), cornerRadius = CornerRadius(24f, 24f))
-                                drawRoundRect(
-                                    color = CyanGlow,
-                                    cornerRadius = CornerRadius(24f, 24f),
-                                    style = Stroke(width = 4f)
-                                )
-                                val measured = textMeasurer.measure(
-                                    text = currentDragLabel,
-                                    style = TextStyle(color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold),
-                                    maxLines = 1
-                                )
-                                drawText(
-                                    textLayoutResult = measured,
-                                    topLeft = Offset(
-                                        x = ((size.width - measured.size.width) / 2f).coerceAtLeast(8f),
-                                        y = ((size.height - measured.size.height) / 2f).coerceAtLeast(8f)
-                                    )
-                                )
-                            }
-                        ) {
-                            detectDragGesturesAfterLongPress(
-                                onDragStart = {
-                                    val snapshot = currentDragItems
-                                    if (snapshot.isNotEmpty()) {
-                                        startTransfer(
-                                            DragAndDropTransferData(
-                                                clipData = CrossWindowTransferBus.buildClipData(windowInstanceId, snapshot),
-                                                flags = View.DRAG_FLAG_GLOBAL or View.DRAG_FLAG_GLOBAL_URI_READ
-                                            )
-                                        )
-                                    }
-                                },
-                                onDrag = { _, _ -> }
-                            )
-                        }
-                        .clickable(onClick = onClick)
-                } else {
-                    Modifier.combinedClickable(
-                        onClick = onClick,
-                        onLongClick = onLongClick
-                    )
-                }
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = { showItemMenu = true }
             )
     ) {
         Box(modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(10.dp),
+                    .padding(start = 8.dp, end = 8.dp, top = 14.dp, bottom = 10.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                FileIcon(item = item, isSelected = isSelected, modifier = Modifier.size(42.dp))
+                FileIcon(item = item, isSelected = false, modifier = Modifier.size(42.dp))
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = item.name,
@@ -3195,46 +2717,47 @@ private fun GridFileCard(
                         style = MaterialTheme.typography.labelSmall,
                         fontSize = 10.sp
                     )
-                } else if (onOpenFolderInSelection != null) {
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = GoldAccent.copy(alpha = 0.16f),
-                        border = BorderStroke(0.8.dp, GoldAccent.copy(alpha = 0.5f)),
-                        modifier = Modifier
-                            .defaultMinSize(minWidth = 48.dp, minHeight = 26.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .clickable(onClick = onOpenFolderInSelection)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "Mở",
-                                color = GoldAccent,
-                                fontSize = 10.5.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                contentDescription = "Mở thư mục ${item.name}",
-                                tint = GoldAccent,
-                                modifier = Modifier.size(14.dp)
-                            )
-                        }
-                    }
                 }
             }
-            if (isSelectionMode) {
-                Icon(
-                    imageVector = if (isSelected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-                    contentDescription = if (isSelected) "Đã chọn ${item.name}" else "Chưa chọn ${item.name}",
-                    tint = if (isSelected) CyanGlow else TextMuted,
+
+            Box(modifier = Modifier.align(Alignment.TopEnd)) {
+                IconButton(
+                    onClick = { showItemMenu = true },
                     modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(6.dp)
-                        .size(20.dp)
+                        .size(48.dp)
+                        .testTag("grid_item_more_menu")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.MoreVert,
+                        contentDescription = "Tùy chọn ${item.name}",
+                        tint = TextMuted,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                ItemActionsDropdownMenu(
+                    expanded = showItemMenu,
+                    onDismiss = { showItemMenu = false },
+                    item = item,
+                    currentDir = currentDir,
+                    clipboard = clipboard,
+                    otherPaneDirName = otherPaneDirName,
+                    onTransferToOtherPane = onTransferToOtherPane,
+                    onOpenItem = onClick,
+                    onOpenFileOrInspector = onOpenFileOrInspector,
+                    onCopyToClipboard = onCopyToClipboard,
+                    onCutToClipboard = onCutToClipboard,
+                    onPasteClipboard = onPasteClipboard,
+                    onCopyToFolder = onCopyToFolder,
+                    onMoveToFolder = onMoveToFolder,
+                    onToggleFavorite = onToggleFavorite,
+                    onOpenWith = onOpenWith,
+                    onCompress = onCompress,
+                    onExtractHere = onExtractHere,
+                    onExtractToFolder = onExtractToFolder,
+                    onRename = onRename,
+                    onShowInfo = onShowInfo,
+                    onDelete = onDelete
                 )
             }
         }

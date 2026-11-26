@@ -828,6 +828,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setClipboardItems(action: ClipboardAction, items: List<FileItem>) {
+        if (items.isEmpty()) return
+        _clipboard.value = ClipboardState(action = action, items = items)
+        val verb = if (action == ClipboardAction.COPY) "sao chép" else "cắt"
+        val label = if (items.size == 1) items.first().name else "${items.size} mục"
+        _statusMessage.value = "Đã $verb \"$label\" — mở thư mục đích và chọn Dán"
+    }
+
     fun clearClipboard() {
         _clipboard.value = null
     }
@@ -842,7 +850,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
 
             var successCount = 0
+            var skippedSameOrNested = 0
             withContext(Dispatchers.IO) {
+                targetDirectory.mkdirs()
+                val targetCanonical = runCatching { targetDirectory.canonicalPath }.getOrDefault(targetDirectory.absolutePath)
                 clip.items.forEachIndexed { index, item ->
                     _operationProgress.value = _operationProgress.value.copy(
                         currentFileIndex = index + 1,
@@ -850,6 +861,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         progress = if (clip.items.isNotEmpty()) (index + 1).toFloat() / clip.items.size.toFloat() else 1f
                     )
                     val src = File(item.path)
+                    if (!src.exists()) return@forEachIndexed
+                    val srcCanonical = runCatching { src.canonicalPath }.getOrDefault(src.absolutePath)
+                    val srcParentCanonical = runCatching { src.parentFile?.canonicalPath }.getOrNull()
+
+                    if (src.isDirectory && (targetCanonical == srcCanonical || targetCanonical.startsWith(srcCanonical + File.separator))) {
+                        skippedSameOrNested++
+                        return@forEachIndexed
+                    }
+                    if (clip.action == ClipboardAction.CUT && srcParentCanonical == targetCanonical) {
+                        skippedSameOrNested++
+                        return@forEachIndexed
+                    }
+
                     val res = if (clip.action == ClipboardAction.COPY) {
                         FileOperations.copyFileOrDirectory(src, targetDirectory)
                     } else {
@@ -860,13 +884,74 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             _operationProgress.value = OperationProgress(isRunning = false)
-            if (successCount > 0) {
-                _statusMessage.value = "Đã xử lý thành công $successCount tệp"
-                if (clip.action == ClipboardAction.CUT) clearClipboard()
-                loadDirectory(_currentDirectory.value)
-                if (_isDualPaneMode.value) loadSecondaryDirectory(_secondaryDirectory.value)
-            } else {
-                _statusMessage.value = "Không thể xử lý tệp"
+            val targetName = targetDirectory.name.ifEmpty { targetDirectory.absolutePath }
+            when {
+                successCount > 0 -> {
+                    val verb = if (clip.action == ClipboardAction.COPY) "Đã sao chép" else "Đã di chuyển"
+                    _statusMessage.value = "$verb $successCount mục vào $targetName"
+                    if (clip.action == ClipboardAction.CUT) clearClipboard()
+                    loadDirectory(_currentDirectory.value)
+                    if (_isDualPaneMode.value) loadSecondaryDirectory(_secondaryDirectory.value)
+                }
+                skippedSameOrNested > 0 -> {
+                    _statusMessage.value = "Không thể dán thư mục vào chính nó hoặc cùng vị trí"
+                }
+                else -> {
+                    _statusMessage.value = "Không thể xử lý tệp"
+                }
+            }
+        }
+    }
+
+    fun moveOrCopySingleItem(item: FileItem, targetDir: File, isMove: Boolean) {
+        viewModelScope.launch {
+            _operationProgress.value = OperationProgress(
+                isRunning = true,
+                title = if (isMove) "Đang di chuyển ${item.name}..." else "Đang sao chép ${item.name}...",
+                totalFiles = 1,
+                currentFileIndex = 1,
+                currentFileName = item.name,
+                progress = 0.5f
+            )
+            var skipped = false
+            val ok = withContext(Dispatchers.IO) {
+                val src = File(item.path)
+                if (!src.exists()) return@withContext false
+                targetDir.mkdirs()
+                val targetCanonical = runCatching { targetDir.canonicalPath }.getOrDefault(targetDir.absolutePath)
+                val srcCanonical = runCatching { src.canonicalPath }.getOrDefault(src.absolutePath)
+                val srcParentCanonical = runCatching { src.parentFile?.canonicalPath }.getOrNull()
+
+                if (src.isDirectory && (targetCanonical == srcCanonical || targetCanonical.startsWith(srcCanonical + File.separator))) {
+                    skipped = true
+                    return@withContext false
+                }
+                if (isMove && srcParentCanonical == targetCanonical) {
+                    skipped = true
+                    return@withContext false
+                }
+
+                val res = if (isMove) {
+                    FileOperations.moveFileOrDirectory(src, targetDir)
+                } else {
+                    FileOperations.copyFileOrDirectory(src, targetDir)
+                }
+                res.isSuccess
+            }
+            _operationProgress.value = OperationProgress(isRunning = false)
+            val targetName = targetDir.name.ifEmpty { targetDir.absolutePath }
+            when {
+                ok -> {
+                    _statusMessage.value = if (isMove) "Đã di chuyển ${item.name} vào $targetName" else "Đã sao chép ${item.name} vào $targetName"
+                    loadDirectory(_currentDirectory.value)
+                    if (_isDualPaneMode.value) loadSecondaryDirectory(_secondaryDirectory.value)
+                }
+                skipped -> {
+                    _statusMessage.value = "Không thể chuyển thư mục vào chính nó hoặc cùng vị trí"
+                }
+                else -> {
+                    _statusMessage.value = "Không thể xử lý tệp (kiểm tra quyền truy cập)"
+                }
             }
         }
     }

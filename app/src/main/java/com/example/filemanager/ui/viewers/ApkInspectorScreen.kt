@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.filemanager.apk.ApkDetails
 import com.example.filemanager.apk.ApkInspector
+import com.example.filemanager.apk.ApkInstaller
 import com.example.filemanager.model.FileItem
 import com.example.filemanager.utils.FileUtils
 import com.example.ui.theme.*
@@ -72,6 +73,23 @@ fun ApkInspectorScreen(
                     }
                 },
                 actions = {
+                    Button(
+                        onClick = {
+                            val res = ApkInstaller.installApk(context, apkFile)
+                            if (res.isFailure) {
+                                coroutineScope.launch {
+                                    snackbarHostState.showSnackbar(res.exceptionOrNull()?.message ?: "Lỗi cài đặt")
+                                }
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = ColorSuccessGreen),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.padding(end = 4.dp)
+                    ) {
+                        Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Cài đặt APK", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
                     IconButton(onClick = {
                         if (!FileUtils.shareFile(context, apkFile)) {
                             coroutineScope.launch {
@@ -199,6 +217,25 @@ fun ApkInspectorScreen(
                             ApkStatBadge("Min SDK", "${details.minSdk}")
                             ApkStatBadge("Target SDK", "${details.targetSdk}")
                             ApkStatBadge("CPU", if (details.architectures.isEmpty()) "Không lib" else details.architectures.first())
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(
+                            onClick = {
+                                val res = ApkInstaller.installApk(context, apkFile)
+                                if (res.isFailure) {
+                                    coroutineScope.launch {
+                                        snackbarHostState.showSnackbar(res.exceptionOrNull()?.message ?: "Lỗi cài đặt")
+                                    }
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = ColorSuccessGreen),
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("CÀI ĐẶT ỨNG DỤNG NÀY (INSTALL APK)", fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
                         }
                     }
                 }

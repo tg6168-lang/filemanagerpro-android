@@ -2,6 +2,7 @@ package com.example
 
 import android.app.Application
 import androidx.test.core.app.ApplicationProvider
+import com.example.filemanager.model.ClipboardAction
 import com.example.filemanager.utils.FileUtils
 import com.example.filemanager.viewmodel.MainViewModel
 import kotlinx.coroutines.Dispatchers
@@ -15,6 +16,7 @@ import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -113,5 +115,45 @@ class MainViewModelSelectionTest {
         assertFalse(fileA2.exists())
         assertTrue(File(targetDir, "b1.txt").exists())
         assertTrue(viewModel.selectedItems.value.isEmpty())
+    }
+
+    @Test
+    fun clipboardAndSingleItemMoveOrCopy_workCorrectly() = runBlocking {
+        val sourceDir = tempFolder.newFolder("SourceDir")
+        val targetDir = tempFolder.newFolder("TargetDir")
+        val nestedDir = File(sourceDir, "Nested").apply { mkdirs() }
+
+        val sampleFile = File(sourceDir, "note.txt").apply { writeText("Hello") }
+        val sampleItem = FileUtils.fileToFileItem(sampleFile)
+        val nestedItem = FileUtils.fileToFileItem(nestedDir)
+
+        // Copy via clipboard into targetDir
+        viewModel.setClipboardItems(ClipboardAction.COPY, listOf(sampleItem))
+        assertEquals(ClipboardAction.COPY, viewModel.clipboard.value?.action)
+        viewModel.pasteClipboard(targetDir)
+        awaitIdle { File(targetDir, "note.txt").exists() && !viewModel.operationProgress.value.isRunning }
+
+        assertTrue(sampleFile.exists())
+        assertTrue(File(targetDir, "note.txt").exists())
+        // Copy keeps clipboard until cleared or replaced
+        assertEquals(1, viewModel.clipboard.value?.items?.size)
+
+        // Cut via clipboard and verify same-directory paste is safely ignored (file stays intact)
+        viewModel.setClipboardItems(ClipboardAction.CUT, listOf(sampleItem))
+        viewModel.pasteClipboard(sourceDir)
+        assertTrue(sampleFile.exists())
+
+        // Paste cut into nestedDir moves file and clears clipboard
+        viewModel.pasteClipboard(nestedDir)
+        awaitIdle { File(nestedDir, "note.txt").exists() && !viewModel.operationProgress.value.isRunning }
+        assertFalse(sampleFile.exists())
+        assertTrue(File(nestedDir, "note.txt").exists())
+        assertNull(viewModel.clipboard.value)
+
+        // Direct single-item copy of folder
+        viewModel.moveOrCopySingleItem(nestedItem, targetDir, isMove = false)
+        awaitIdle { File(targetDir, "Nested/note.txt").exists() && !viewModel.operationProgress.value.isRunning }
+        assertTrue(File(nestedDir, "note.txt").exists())
+        assertTrue(File(targetDir, "Nested/note.txt").exists())
     }
 }

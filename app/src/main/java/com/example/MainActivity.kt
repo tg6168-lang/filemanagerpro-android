@@ -295,8 +295,6 @@ fun MainAppContainer(viewModel: MainViewModel) {
                             viewModel.loadDirectory(dir)
                             viewModel.navigateTo(ScreenDestination.Files)
                         },
-                        onNavigateToGameData = { viewModel.navigateTo(ScreenDestination.GameData) },
-                        onNavigateToAnalyzer = { viewModel.navigateTo(ScreenDestination.Analyzer) },
                         onNavigateToSourcePackage = { viewModel.navigateTo(ScreenDestination.SourcePackage) },
                         onNavigateToSettings = { viewModel.navigateTo(ScreenDestination.Settings) },
                         onNavigateToDualPane = { viewModel.navigateTo(ScreenDestination.DualPane) }

@@ -68,8 +68,6 @@ private data class HomeCategory(
 fun HomeScreen(
     viewModel: MainViewModel,
     onNavigateToFiles: (File) -> Unit,
-    onNavigateToGameData: () -> Unit,
-    onNavigateToAnalyzer: () -> Unit,
     onNavigateToSourcePackage: () -> Unit = {},
     onNavigateToSettings: () -> Unit,
     onNavigateToDualPane: () -> Unit = { viewModel.navigateTo(ScreenDestination.DualPane) }
@@ -365,26 +363,6 @@ fun HomeScreen(
                         ) {
                             viewModel.toggleDualPane(true)
                             viewModel.openStorageRoot(internalDir)
-                        }
-
-                        PremiumFeatureCard(
-                            title = "Dữ liệu Game (OBB / PAK / Asset)",
-                            subtitle = "Nhận diện UnityFS, Unreal PAK, DEX & Entropy mã hóa",
-                            icon = Icons.Default.SportsEsports,
-                            accentColor = VioletGlow,
-                            modifier = Modifier.testTag("home_game_data_card")
-                        ) {
-                            onNavigateToGameData()
-                        }
-
-                        PremiumFeatureCard(
-                            title = "Công cụ phân tích & Kiểm tra",
-                            subtitle = "APK Inspector, SQLite Viewer, Hex Editor, Hash & Trùng lặp",
-                            icon = Icons.Default.BuildCircle,
-                            accentColor = GoldAccent,
-                            modifier = Modifier.testTag("home_analyzer_card")
-                        ) {
-                            onNavigateToAnalyzer()
                         }
 
                         PremiumFeatureCard(
